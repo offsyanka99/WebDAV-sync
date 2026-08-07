@@ -2,7 +2,7 @@
 
 Android app that keeps local folders and WebDAV remote folders in sync — manually, on a schedule, or when files change.
 
-**Current release:** [v1.0.12](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.0.12)  
+**Current release:** [v1.0.14](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.0.14)  
 **Min Android:** 8.0 (API 26)  
 **License:** [MIT](LICENSE)
 
@@ -21,6 +21,7 @@ Android app that keeps local folders and WebDAV remote folders in sync — manua
 - **Wi‑Fi only**, mobile-data warning, parallel transfers, retries
 - **Quota display** (RFC 4331) on Overview when the server supports it
 - **Home-screen widget** (4×1): status, recent change counts, Sync button
+- **Color-coded sync status** — OK (green), in process (yellow), ERROR (red) on Overview and widget
 - **Encrypted credentials** (EncryptedSharedPreferences / Keystore)
 - **Backup & restore** of accounts and folder-pair configuration
 - **Optional custom CA** for self-signed / private servers
@@ -103,6 +104,13 @@ Core flow: scan local + remote → diff against last-sync baseline → transfer/
 - **Issues:** [GitHub Issues](https://github.com/offsyanka99/WebDAV-sync/issues)
 
 ## Changelog (recent)
+
+### v1.0.14
+
+- **Status colors** on Overview and home widget: OK / Ready green, syncing yellow, ERROR red
+- **SAF name sanitization** — when local storage rewrites unsafe characters in remote names (e.g. `?` → `_`), sync keeps the real remote path so files are not re-downloaded or mis-matched every pass
+- Widget Sync button styling aligned with the rest of the UI
+- Contact email updated
 
 ### v1.0.12
 
