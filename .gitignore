@@ -16,3 +16,8 @@ keystore.properties
 
 # Not part of the app (reference screenshots / notes)
 immich-20260806_102458/
+
+# Local planning / audit notes (not published)
+development-plan.md
+requirements.md
+security-audit-report.md
