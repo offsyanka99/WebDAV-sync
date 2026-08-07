@@ -71,6 +71,11 @@ object SyncWidgetRenderer {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         views.setOnClickPendingIntent(R.id.widget_sync_button, syncPending)
+        // Ensure white-on-blue pill (RemoteViews can ignore some theme text colors on OEM skins).
+        views.setTextColor(
+            R.id.widget_sync_button,
+            ContextCompat.getColor(context, R.color.widget_button_text),
+        )
 
         return views
     }

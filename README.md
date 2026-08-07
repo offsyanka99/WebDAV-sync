@@ -99,7 +99,7 @@ Core flow: scan local + remote → diff against last-sync baseline → transfer/
 
 ## Contact
 
-- **Email:** hummersoft@vovchenko.org  
+- **Email:** hummersoft@mailbox.org  
 - **Issues:** [GitHub Issues](https://github.com/offsyanka99/WebDAV-sync/issues)
 
 ## Changelog (recent)

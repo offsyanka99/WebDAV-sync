@@ -81,10 +81,14 @@
         android:layout_height="wrap_content"
         android:layout_marginStart="10dp"
         android:background="@drawable/widget_button_background"
-        android:paddingHorizontal="12dp"
-        android:paddingVertical="8dp"
+        android:gravity="center"
+        android:minWidth="72dp"
+        android:minHeight="40dp"
+        android:paddingHorizontal="20dp"
+        android:paddingVertical="10dp"
         android:text="@string/widget_sync"
-        android:textColor="@color/md_theme_on_primary"
-        android:textSize="12sp"
+        android:textAllCaps="false"
+        android:textColor="@color/widget_button_text"
+        android:textSize="15sp"
         android:textStyle="bold" />
 </LinearLayout>

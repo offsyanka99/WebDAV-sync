@@ -30,7 +30,7 @@ import androidx.compose.ui.unit.dp
 import org.vovchenko.webdavsync.BuildConfig
 import org.vovchenko.webdavsync.R
 
-private const val CONTACT_EMAIL = "hummersoft@vovchenko.org"
+private const val CONTACT_EMAIL = "hummersoft@mailbox.org"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
