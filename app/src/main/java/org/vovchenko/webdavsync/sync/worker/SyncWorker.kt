@@ -104,8 +104,11 @@ class SyncWorker @AssistedInject constructor(
 
         // One authoritative counter batch for the whole worker pass. Without this, Overview only
         // saw the last pair's SYNC_END timestamp — quiet last pairs wiped earlier uploads/downloads.
+        // Skip all-zero summaries so an idle follow-up does not replace the real pass's totals.
         val summaryPairId = syncedPairIds.lastOrNull()
-        if (summaryPairId != null) {
+        val sessionHadWork = sessionUploaded + sessionDownloaded + sessionDeletedLocal +
+            sessionDeletedRemote > 0 || hadErrors
+        if (summaryPairId != null && sessionHadWork) {
             diagnosticLogger.i(
                 TAG,
                 "Session recent-changes summary: up=$sessionUploaded down=$sessionDownloaded " +
@@ -118,6 +121,8 @@ class SyncWorker @AssistedInject constructor(
                 deletedLocal = sessionDeletedLocal,
                 deletedRemote = sessionDeletedRemote,
             )
+        } else if (summaryPairId != null) {
+            diagnosticLogger.i(TAG, "Skip zero session summary (idle pass, preserve recent changes)")
         }
 
         // Avoid instant-upload poll treating post-sync local tree changes as a new user edit.

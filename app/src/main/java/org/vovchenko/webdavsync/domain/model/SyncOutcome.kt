@@ -16,4 +16,11 @@ data class SyncOutcome(
 ) {
     val hasErrors: Boolean get() = errors > 0 && !cancelled
     val totalChanges: Int get() = uploaded + downloaded + deletedLocal + deletedRemote
+
+    /**
+     * True when the pass confirmed both sides match and did no work.
+     * Used so a short follow-up sync does not overwrite Last sync / Duration / Recent changes.
+     */
+    val isIdleNoOp: Boolean
+        get() = !cancelled && !hasErrors && totalChanges == 0 && conflicts == 0 && skipped == 0
 }

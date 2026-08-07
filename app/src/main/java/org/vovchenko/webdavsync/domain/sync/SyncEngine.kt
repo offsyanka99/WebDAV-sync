@@ -177,7 +177,6 @@ class SyncEngine @Inject constructor(
         val wallEnd = System.currentTimeMillis()
         val durationMs = SystemClock.elapsedRealtime() - elapsedStart
         val finalOutcome = outcome.copy(durationMs = durationMs)
-        logOutcome(pair.id, wallEnd, finalOutcome)
         val status = when {
             finalOutcome.cancelled -> "CANCELLED"
             finalOutcome.hasErrors -> "ERROR"
@@ -188,8 +187,20 @@ class SyncEngine @Inject constructor(
             "Sync end pair='${pair.name}' status=$status uploaded=${finalOutcome.uploaded} " +
                 "downloaded=${finalOutcome.downloaded} deletedLocal=${finalOutcome.deletedLocal} " +
                 "deletedRemote=${finalOutcome.deletedRemote} conflicts=${finalOutcome.conflicts} " +
-                "errors=${finalOutcome.errors} skipped=${finalOutcome.skipped} durationMs=$durationMs",
+                "errors=${finalOutcome.errors} skipped=${finalOutcome.skipped} durationMs=$durationMs" +
+                if (finalOutcome.isIdleNoOp && actions.isEmpty()) " (idle no-op)" else "",
         )
+
+        // Idle follow-up (0 actions, nothing transferred) must not overwrite the real pass's
+        // Last sync / Duration — that made multi-minute downloads show "duration: 1s".
+        if (finalOutcome.isIdleNoOp && actions.isEmpty()) {
+            if (pair.lastSyncStatus != status) {
+                folderPairRepository.update(pair.copy(lastSyncStatus = status))
+            }
+            return finalOutcome
+        }
+
+        logOutcome(pair.id, wallEnd, finalOutcome)
         folderPairRepository.update(
             pair.copy(
                 lastSyncAt = wallEnd,

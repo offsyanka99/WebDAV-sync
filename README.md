@@ -2,7 +2,7 @@
 
 Android app that keeps local folders and WebDAV remote folders in sync — manually, on a schedule, or when files change.
 
-**Current release:** [v1.0.15](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.0.15)  
+**Current release:** [v1.0.16](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.0.16)  
 **Min Android:** 8.0 (API 26)  
 **License:** [MIT](LICENSE)
 
@@ -105,6 +105,11 @@ Core flow: scan local + remote → diff against last-sync baseline → transfer/
 
 ## Changelog (recent)
 
+### v1.0.16
+
+- **Idle follow-up does not overwrite Last sync / Duration / Recent changes** — a short no-op pass after a real multi-minute sync no longer shows “duration: 1s” or zeros out counters
+- Includes the v1.0.15 single-flight / mid-sync race fixes
+
 ### v1.0.15
 
 - **Fix large multi-file sync race**: local folder watch no longer cancels an in-flight sync when downloads rewrite the tree (that caused duplicate uploads, conflicted copies, and stuck “Sync in process…”)
@@ -114,8 +119,6 @@ Core flow: scan local + remote → diff against last-sync baseline → transfer/
 - **Status colors** on Overview and home widget: OK / Ready green, syncing yellow, ERROR red
 - **SAF name sanitization** for remote names rewritten by local storage (e.g. `?` → `_`)
 - Widget Sync button styling polish; contact email update
-
-> **Note:** v1.0.14 was withdrawn — it contained the mid-sync replace bug above. Prefer v1.0.15.
 
 ### v1.0.12
 
