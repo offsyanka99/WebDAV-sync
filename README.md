@@ -3,7 +3,6 @@
 Android app that keeps local folders and WebDAV remote folders in sync — manually, on a schedule, or when files change.
 
 **Current release:** [v1.0.12](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.0.12)  
-**Package:** `org.vovchenko.webdavsync`  
 **Min Android:** 8.0 (API 26)  
 **License:** [MIT](LICENSE)
 
@@ -100,7 +99,6 @@ Core flow: scan local + remote → diff against last-sync baseline → transfer/
 
 ## Contact
 
-- **Author:** Yury Vovchenko  
 - **Email:** hummersoft@vovchenko.org  
 - **Issues:** [GitHub Issues](https://github.com/offsyanka99/WebDAV-sync/issues)
 
