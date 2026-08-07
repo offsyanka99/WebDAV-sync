@@ -4,9 +4,11 @@
     android:initialLayout="@layout/widget_sync_4x1"
     android:minWidth="250dp"
     android:minHeight="40dp"
+    android:minResizeWidth="180dp"
+    android:minResizeHeight="40dp"
     android:previewLayout="@layout/widget_sync_4x1"
-    android:resizeMode="horizontal|vertical"
+    android:resizeMode="horizontal"
     android:targetCellWidth="4"
     android:targetCellHeight="1"
-    android:updatePeriodMillis="1800000"
+    android:updatePeriodMillis="0"
     android:widgetCategory="home_screen" />

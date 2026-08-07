@@ -13,9 +13,7 @@
     <color name="md_theme_error">#EF9A9A</color>
     <color name="status_ok">#81C784</color>
     <color name="status_warn">#FFB74D</color>
+    <color name="status_error">#EF5350</color>
     <color name="status_off">#B0B0B0</color>
     <color name="ic_launcher_background">#353652</color>
-    <!-- Widget Sync button: filled pill like system/notification action buttons (white on blue). -->
-    <color name="widget_button_background">#1E88E5</color>
-    <color name="widget_button_text">#FFFFFF</color>
 </resources>

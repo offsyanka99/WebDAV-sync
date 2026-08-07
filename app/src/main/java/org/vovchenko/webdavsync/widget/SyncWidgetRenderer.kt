@@ -18,7 +18,7 @@ object SyncWidgetRenderer {
         val (statusText, statusColorRes) = when {
             state.syncing -> context.getString(R.string.widget_status_syncing) to R.color.status_warn
             state.status.equals("ERROR", ignoreCase = true) ->
-                context.getString(R.string.widget_status_error) to R.color.md_theme_error
+                context.getString(R.string.widget_status_error) to R.color.status_error
             state.status.equals("CANCELLED", ignoreCase = true) ->
                 context.getString(R.string.widget_status_cancelled) to R.color.status_warn
             state.status.equals("OK", ignoreCase = true) ->
@@ -71,10 +71,11 @@ object SyncWidgetRenderer {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         views.setOnClickPendingIntent(R.id.widget_sync_button, syncPending)
-        // Ensure white-on-blue pill (RemoteViews can ignore some theme text colors on OEM skins).
+        // Same bind-time colors as WiFi-VPN widgetToggle (primary_container + on_primary_container).
+        views.setInt(R.id.widget_sync_button, "setBackgroundResource", R.drawable.widget_button_background)
         views.setTextColor(
             R.id.widget_sync_button,
-            ContextCompat.getColor(context, R.color.widget_button_text),
+            ContextCompat.getColor(context, R.color.md_theme_on_primary_container),
         )
 
         return views

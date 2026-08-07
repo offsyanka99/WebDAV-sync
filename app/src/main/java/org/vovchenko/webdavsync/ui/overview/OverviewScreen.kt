@@ -17,11 +17,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import org.vovchenko.webdavsync.ui.components.Formatters
 import org.vovchenko.webdavsync.ui.components.LabeledRow
 import org.vovchenko.webdavsync.ui.components.SectionCard
+import org.vovchenko.webdavsync.ui.theme.StatusError
+import org.vovchenko.webdavsync.ui.theme.StatusOk
+import org.vovchenko.webdavsync.ui.theme.StatusWarn
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -62,7 +66,11 @@ fun OverviewScreen(
                 SectionCard(title = "Sync status") {
                     LabeledRow(label = "Last sync", value = Formatters.timestamp(uiState.lastSyncAtMillis))
                     LabeledRow(label = "Duration", value = Formatters.duration(uiState.lastSyncDurationMs))
-                    LabeledRow(label = "Status", value = uiState.statusDisplay)
+                    LabeledRow(
+                        label = "Status",
+                        value = uiState.statusDisplay,
+                        valueColor = statusColor(uiState),
+                    )
                 }
             }
             item {
@@ -110,5 +118,17 @@ fun OverviewScreen(
                 TextButton(onClick = viewModel::dismissMobileDataWarning) { Text("Cancel") }
             },
         )
+    }
+}
+
+/** OK / Ready → green, in process → yellow, ERROR → red (CANCELLED → yellow). */
+private fun statusColor(state: OverviewUiState): Color {
+    if (state.syncing) return StatusWarn
+    return when (state.lastSyncStatus?.uppercase()) {
+        "OK" -> StatusOk
+        "ERROR" -> StatusError
+        "CANCELLED" -> StatusWarn
+        null -> StatusOk // Ready
+        else -> Color.Unspecified
     }
 }

@@ -69,24 +69,26 @@ sealed interface SyncMethodStrategy {
             val lState = localState(local, baseline)
             val rState = remoteState(remote, baseline)
 
+            // Prefer the entry's own remote path (the server's actual name) over the canonical/local-safe path.
+            val remotePath = remote?.relativePath ?: relativePath
             return when {
                 lState == ChangeState.UNCHANGED && rState == ChangeState.UNCHANGED -> null
                 lState != ChangeState.UNCHANGED && rState == ChangeState.UNCHANGED -> when (lState) {
-                    ChangeState.DELETED -> SyncAction.DeleteRemoteFile(relativePath)
-                    else -> SyncAction.UploadFile(relativePath)
+                    ChangeState.DELETED -> SyncAction.DeleteRemoteFile(relativePath, remotePath)
+                    else -> SyncAction.UploadFile(relativePath, remotePath)
                 }
                 lState == ChangeState.UNCHANGED && rState != ChangeState.UNCHANGED -> when (rState) {
                     ChangeState.DELETED -> SyncAction.DeleteLocalFile(relativePath)
-                    else -> SyncAction.DownloadFile(relativePath, remote?.sizeBytes ?: 0L)
+                    else -> SyncAction.DownloadFile(relativePath, remote?.sizeBytes ?: 0L, remotePath)
                 }
                 lState == ChangeState.DELETED && rState == ChangeState.DELETED -> null
                 // One side deleted, the other modified → resurrect the modified side (§4.2), not a rename-conflict.
-                lState == ChangeState.DELETED -> SyncAction.DownloadFile(relativePath, remote?.sizeBytes ?: 0L)
-                rState == ChangeState.DELETED -> SyncAction.UploadFile(relativePath)
+                lState == ChangeState.DELETED -> SyncAction.DownloadFile(relativePath, remote?.sizeBytes ?: 0L, remotePath)
+                rState == ChangeState.DELETED -> SyncAction.UploadFile(relativePath, remotePath)
                 // Both created/modified independently: if they happen to match, just adopt — else true conflict.
                 local != null && remote != null && local.sizeBytes == remote.sizeBytes &&
                     mtimesClose(local.lastModifiedEpochMillis, remote.lastModifiedEpochMillis) -> null
-                else -> SyncAction.Conflict(relativePath, pickWinner(local, remote))
+                else -> SyncAction.Conflict(relativePath, pickWinner(local, remote), remotePath)
             }
         }
     }
@@ -100,9 +102,9 @@ sealed interface SyncMethodStrategy {
             baseline: SyncFileStateEntity?,
         ): SyncAction? = when {
             remote == null -> if (baseline != null && local != null) SyncAction.DeleteLocalFile(relativePath) else null
-            local == null -> SyncAction.DownloadFile(relativePath, remote.sizeBytes)
+            local == null -> SyncAction.DownloadFile(relativePath, remote.sizeBytes, remote.relativePath)
             local.sizeBytes == remote.sizeBytes && mtimesClose(local.lastModifiedEpochMillis, remote.lastModifiedEpochMillis) -> null
-            else -> SyncAction.DownloadFile(relativePath, remote.sizeBytes)
+            else -> SyncAction.DownloadFile(relativePath, remote.sizeBytes, remote.relativePath)
         }
     }
 
@@ -114,10 +116,10 @@ sealed interface SyncMethodStrategy {
             remote: RemoteFileEntry?,
             baseline: SyncFileStateEntity?,
         ): SyncAction? = when {
-            local == null -> if (baseline != null && remote != null) SyncAction.DeleteRemoteFile(relativePath) else null
+            local == null -> if (baseline != null && remote != null) SyncAction.DeleteRemoteFile(relativePath, remote.relativePath) else null
             remote == null -> SyncAction.UploadFile(relativePath)
             local.sizeBytes == remote.sizeBytes && mtimesClose(local.lastModifiedEpochMillis, remote.lastModifiedEpochMillis) -> null
-            else -> SyncAction.UploadFile(relativePath)
+            else -> SyncAction.UploadFile(relativePath, remote.relativePath)
         }
     }
 

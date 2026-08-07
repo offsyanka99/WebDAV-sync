@@ -174,15 +174,16 @@ class TransferExecutor @Inject constructor(
     }
 
     private suspend fun executeFileAction(action: SyncAction, ctx: TransferContext): ActionResult = when (action) {
-        is SyncAction.UploadFile -> uploadFile(action.relativePath, ctx)
-        is SyncAction.DownloadFile -> downloadFile(action.relativePath, action.remoteSizeBytes, ctx)
+        is SyncAction.UploadFile -> uploadFile(action.relativePath, action.remoteRelativePath, ctx)
+        is SyncAction.DownloadFile -> downloadFile(action.relativePath, action.remoteRelativePath, action.remoteSizeBytes, ctx)
         is SyncAction.DeleteLocalFile -> deleteLocalFile(action.relativePath, ctx)
-        is SyncAction.DeleteRemoteFile -> deleteRemoteFile(action.relativePath, ctx)
+        is SyncAction.DeleteRemoteFile -> deleteRemoteFile(action.relativePath, action.remoteRelativePath, ctx)
         is SyncAction.Conflict -> resolveConflict(action, ctx)
         is SyncAction.CreateLocalDirectory, is SyncAction.CreateRemoteDirectory -> ActionResult.Skipped
     }
 
-    private suspend fun uploadFile(relativePath: String, ctx: TransferContext): ActionResult {
+    /** [remoteRelativePath] is the server's actual name; it can differ from [relativePath] (the local-safe canonical path). */
+    private suspend fun uploadFile(relativePath: String, remoteRelativePath: String, ctx: TransferContext): ActionResult {
         val local = localFileIo.statOrNull(ctx.localRootUri, relativePath) ?: return ActionResult.Failed
         if (local.sizeBytes <= 0L) {
             diagnosticLogger.w(TAG, "Skip upload of empty local file path=$relativePath")
@@ -194,7 +195,7 @@ class TransferExecutor @Inject constructor(
         }
 
         val input = localFileIo.openInputStream(ctx.localRootUri, relativePath) ?: return ActionResult.Failed
-        val remotePath = RemotePaths.join(ctx.remoteRootPath, relativePath)
+        val remotePath = RemotePaths.join(ctx.remoteRootPath, remoteRelativePath)
         val fileName = relativePath.substringAfterLast('/')
         val result = input.use { ctx.client.upload(remotePath, MimeTypes.guess(fileName), it) }
         if (result.isFailure) {
@@ -217,7 +218,8 @@ class TransferExecutor @Inject constructor(
         return ActionResult.Uploaded
     }
 
-    private suspend fun downloadFile(relativePath: String, remoteSizeBytes: Long, ctx: TransferContext): ActionResult {
+    /** [remoteRelativePath] is the server's actual name; it can differ from [relativePath] (the local-safe canonical path). */
+    private suspend fun downloadFile(relativePath: String, remoteRelativePath: String, remoteSizeBytes: Long, ctx: TransferContext): ActionResult {
         val limit = ctx.downloadSizeLimitBytes
         // Enforce limit before streaming so oversized files never count as downloads and never
         // touch local storage (partial write + delete was easy to misread as a "Download").
@@ -229,7 +231,7 @@ class TransferExecutor @Inject constructor(
             return ActionResult.Skipped
         }
 
-        val remotePath = RemotePaths.join(ctx.remoteRootPath, relativePath)
+        val remotePath = RemotePaths.join(ctx.remoteRootPath, remoteRelativePath)
         val downloadResult = ctx.client.download(remotePath)
         val remoteStream = downloadResult.getOrElse {
             diagnosticLogger.w(TAG, "Download failed path=$relativePath: ${it.message}")
@@ -283,8 +285,8 @@ class TransferExecutor @Inject constructor(
         return ActionResult.DeletedLocal
     }
 
-    private suspend fun deleteRemoteFile(relativePath: String, ctx: TransferContext): ActionResult {
-        val remotePath = RemotePaths.join(ctx.remoteRootPath, relativePath)
+    private suspend fun deleteRemoteFile(relativePath: String, remoteRelativePath: String, ctx: TransferContext): ActionResult {
+        val remotePath = RemotePaths.join(ctx.remoteRootPath, remoteRelativePath)
         val result = ctx.client.delete(remotePath)
         // A 404 here just means it's already gone remotely — treat as success either way.
         if (result.isFailure && result.exceptionOrNull() !is WebDavException.NotFound) return ActionResult.Failed
@@ -304,7 +306,7 @@ class TransferExecutor @Inject constructor(
             } ?: false
             // Local wins → remote's current content is the loser, download it aside as a local copy first.
             SyncAction.Side.REMOTE -> {
-                val remotePath = RemotePaths.join(ctx.remoteRootPath, relativePath)
+                val remotePath = RemotePaths.join(ctx.remoteRootPath, action.remoteRelativePath)
                 ctx.client.download(remotePath).getOrNull()?.use { input ->
                     localFileIo.openOutputStream(ctx.localRootUri, conflictCopyPath)?.use { out -> input.copyTo(out) } != null
                 } ?: false
@@ -316,8 +318,8 @@ class TransferExecutor @Inject constructor(
         }
 
         val applied = when (action.winningSide) {
-            SyncAction.Side.LOCAL -> uploadFile(relativePath, ctx)
-            SyncAction.Side.REMOTE -> downloadFile(relativePath, remoteSizeBytes = 0L, ctx)
+            SyncAction.Side.LOCAL -> uploadFile(relativePath, action.remoteRelativePath, ctx)
+            SyncAction.Side.REMOTE -> downloadFile(relativePath, action.remoteRelativePath, remoteSizeBytes = 0L, ctx)
         }
         return if (applied is ActionResult.Failed) {
             ActionResult.Failed

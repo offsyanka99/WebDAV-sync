@@ -13,6 +13,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 
@@ -40,6 +41,7 @@ fun LabeledRow(
     label: String,
     value: String,
     modifier: Modifier = Modifier,
+    valueColor: Color = Color.Unspecified,
 ) {
     Row(
         modifier = modifier
@@ -56,6 +58,7 @@ fun LabeledRow(
         Text(
             text = value,
             style = MaterialTheme.typography.bodyMedium,
+            color = valueColor,
             modifier = Modifier.weight(1f),
             textAlign = TextAlign.End,
         )

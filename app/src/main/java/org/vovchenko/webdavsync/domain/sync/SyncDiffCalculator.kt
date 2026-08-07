@@ -2,6 +2,7 @@ package org.vovchenko.webdavsync.domain.sync
 
 import org.vovchenko.webdavsync.data.local.SyncFileStateEntity
 import org.vovchenko.webdavsync.data.local.saf.LocalFileEntry
+import org.vovchenko.webdavsync.data.local.saf.LocalNameSanitizer
 import org.vovchenko.webdavsync.data.model.SyncMethod
 import org.vovchenko.webdavsync.domain.model.SyncAction
 import javax.inject.Inject
@@ -30,7 +31,10 @@ class SyncDiffCalculator @Inject constructor() {
         remoteEntries: List<RemoteFileEntry>,
     ): List<SyncAction> {
         val localDirs = localEntries.filter { it.isDirectory }.map { it.relativePath }.toSet()
-        val remoteDirs = remoteEntries.filter { it.isDirectory }.map { it.relativePath }.toSet()
+        // Canonicalize to the local-safe path: some SAF providers rewrite unsafe characters (e.g. `?` → `_`)
+        // when a directory is created, so matching against the remote's raw name would never agree.
+        val remoteDirs = remoteEntries.filter { it.isDirectory }
+            .map { LocalNameSanitizer.sanitizeRelativePath(it.relativePath) }.toSet()
         // Shallowest first so parent directories are created before their children.
         val allDirs = (localDirs + remoteDirs).sortedBy { path -> path.count { it == '/' } }
 
@@ -57,7 +61,10 @@ class SyncDiffCalculator @Inject constructor() {
         baseline: List<SyncFileStateEntity>,
     ): List<SyncAction> {
         val localByPath = localEntries.filterNot { it.isDirectory }.associateBy { it.relativePath }
-        val remoteByPath = remoteEntries.filterNot { it.isDirectory }.associateBy { it.relativePath }
+        // Same canonicalization as directories above (see comment there) so a rewritten local file
+        // name isn't mistaken for a brand new local-only file on every sync pass.
+        val remoteByPath = remoteEntries.filterNot { it.isDirectory }
+            .associateBy { LocalNameSanitizer.sanitizeRelativePath(it.relativePath) }
         val baselineByPath = baseline.associateBy { it.relativePath }
 
         val allFilePaths = localByPath.keys + remoteByPath.keys + baselineByPath.keys

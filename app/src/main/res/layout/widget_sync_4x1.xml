@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Compact 4×1: title then status on the left; Sync button on the right. -->
+<!-- 4×1 bar: mirror WiFi-VPN widget_status_4x1 structure (content left, action button right). -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
     android:layout_width="match_parent"
@@ -7,8 +7,8 @@
     android:background="@drawable/widget_background"
     android:gravity="center_vertical"
     android:orientation="horizontal"
-    android:paddingHorizontal="10dp"
-    android:paddingVertical="6dp">
+    android:paddingHorizontal="12dp"
+    android:paddingVertical="8dp">
 
     <LinearLayout
         android:layout_width="0dp"
@@ -75,20 +75,19 @@
             android:textSize="11sp" />
     </LinearLayout>
 
+    <!-- Identical to WiFi-VPN widgetToggle (Start/Stop) TextView. -->
     <TextView
         android:id="@+id/widget_sync_button"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginStart="10dp"
+        android:layout_marginStart="8dp"
         android:background="@drawable/widget_button_background"
         android:gravity="center"
         android:minWidth="72dp"
-        android:minHeight="40dp"
-        android:paddingHorizontal="20dp"
-        android:paddingVertical="10dp"
+        android:paddingHorizontal="12dp"
+        android:paddingVertical="8dp"
         android:text="@string/widget_sync"
-        android:textAllCaps="false"
-        android:textColor="@color/widget_button_text"
-        android:textSize="15sp"
+        android:textColor="@color/md_theme_on_primary_container"
+        android:textSize="12sp"
         android:textStyle="bold" />
 </LinearLayout>

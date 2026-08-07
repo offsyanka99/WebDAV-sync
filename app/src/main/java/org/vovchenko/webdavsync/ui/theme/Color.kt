@@ -15,4 +15,6 @@ val MdThemeOnSurface = Color(0xFFF0F0F0)
 val MdThemeError = Color(0xFFEF9A9A)
 val StatusOk = Color(0xFF81C784)
 val StatusWarn = Color(0xFFFFB74D)
+/** Clear red for ERROR status (stronger than [MdThemeError] on dark UI). */
+val StatusError = Color(0xFFEF5350)
 val StatusOff = Color(0xFFB0B0B0)
