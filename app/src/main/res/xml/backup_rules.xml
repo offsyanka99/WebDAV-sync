@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="sharedpref" path="webdav_credentials.xml" />
+    <exclude domain="file" path="trusted_certs" />
+    <!-- Server URLs, folder topology, and sync history are still sensitive even without credentials (security audit finding #8). -->
+    <exclude domain="database" path="webdav_sync.db" />
+    <exclude domain="database" path="webdav_sync.db-wal" />
+    <exclude domain="database" path="webdav_sync.db-shm" />
+    <exclude domain="file" path="datastore" />
+</full-backup-content>
