@@ -33,10 +33,11 @@ class SyncWorker @AssistedInject constructor(
     private val syncControl: SyncControl,
     private val diagnosticLogger: DiagnosticLogger,
     private val folderChangeCoordinator: FolderChangeCoordinator,
+    private val syncScheduler: SyncScheduler,
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
-        syncControl.reset()
+        syncControl.beginSession()
         val targetId = inputData.getLong(KEY_FOLDER_PAIR_ID, -1L).takeIf { it >= 0 }
         diagnosticLogger.i(TAG, "Worker start targetPairId=${targetId ?: "all"} runAttempt=$runAttemptCount")
         setForeground(
@@ -48,9 +49,13 @@ class SyncWorker @AssistedInject constructor(
             runSyncPass(targetId)
         } finally {
             diagnosticLogger.i(TAG, "Worker finished cancelled=${syncControl.isCancelled} stopped=$isStopped")
-            syncControl.reset()
+            val followUp = syncControl.endSession()
             // Refresh status + recent-change counters after the pass.
             SyncWidgetProvider.requestUpdate(applicationContext)
+            // Coalesce mid-pass local changes into one follow-up instead of REPLACE mid-download.
+            if (followUp && !isStopped) {
+                syncScheduler.enqueueFollowUpIfNeeded(requested = true)
+            }
         }
     }
 

@@ -1,6 +1,7 @@
 package org.vovchenko.webdavsync.domain.sync
 
 import android.net.Uri
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.async
@@ -73,6 +74,7 @@ class TransferExecutor @Inject constructor(
             syncControl.awaitWhilePaused()
             if (syncControl.shouldStop()) break
             val ok = runCatching { executeDirectoryAction(action, ctx) }.getOrElse {
+                if (it is CancellationException) throw it
                 diagnosticLogger.e(TAG, "Directory action failed path=${action.relativePath}", it)
                 false
             }
@@ -157,6 +159,10 @@ class TransferExecutor @Inject constructor(
             if (syncControl.shouldStop()) return ActionResult.Skipped
 
             lastResult = runCatching { executeFileAction(action, ctx) }.getOrElse {
+                // Cancellation (e.g. this sync got superseded) must propagate, not be treated as a
+                // retryable failure — retrying after cancellation re-downloaded/re-uploaded files
+                // that had already completed, and re-created "conflicted copy" duplicates.
+                if (it is CancellationException) throw it
                 diagnosticLogger.e(TAG, "File action threw path=${action.relativePath} attempt=$attempt/$maxAttempts", it)
                 ActionResult.Failed
             }
@@ -232,37 +238,49 @@ class TransferExecutor @Inject constructor(
         }
 
         val remotePath = RemotePaths.join(ctx.remoteRootPath, remoteRelativePath)
-        val downloadResult = ctx.client.download(remotePath)
-        val remoteStream = downloadResult.getOrElse {
-            diagnosticLogger.w(TAG, "Download failed path=$relativePath: ${it.message}")
-            return ActionResult.Failed
-        }
-        var limitExceeded = false
-        val wrote = remoteStream.use { input ->
-            localFileIo.openOutputStream(ctx.localRootUri, relativePath)?.use { out ->
-                if (limit != null) {
-                    limitExceeded = copyLimited(input, out, limit)
-                    !limitExceeded
-                } else {
-                    input.copyTo(out)
-                    true
-                }
-            } ?: false
-        }
-        if (!wrote || limitExceeded) {
-            // Security audit finding #3: don't leave a truncated partial file on disk.
-            localFileIo.delete(ctx.localRootUri, relativePath)
-            if (limitExceeded) {
-                diagnosticLogger.i(TAG, "Skip download (size limit while streaming) path=$relativePath limit=$limit")
-                return ActionResult.Skipped
+        var baselined = false
+        try {
+            val downloadResult = ctx.client.download(remotePath)
+            val remoteStream = downloadResult.getOrElse {
+                diagnosticLogger.w(TAG, "Download failed path=$relativePath: ${it.message}")
+                return ActionResult.Failed
             }
-            return ActionResult.Failed
-        }
+            var limitExceeded = false
+            val wrote = remoteStream.use { input ->
+                localFileIo.openOutputStream(ctx.localRootUri, relativePath)?.use { out ->
+                    if (limit != null) {
+                        limitExceeded = copyLimited(input, out, limit)
+                        !limitExceeded
+                    } else {
+                        input.copyTo(out)
+                        true
+                    }
+                } ?: false
+            }
+            if (!wrote || limitExceeded) {
+                // Security audit finding #3: don't leave a truncated partial file on disk.
+                localFileIo.delete(ctx.localRootUri, relativePath)
+                if (limitExceeded) {
+                    diagnosticLogger.i(TAG, "Skip download (size limit while streaming) path=$relativePath limit=$limit")
+                    return ActionResult.Skipped
+                }
+                return ActionResult.Failed
+            }
 
-        val stat = localFileIo.statOrNull(ctx.localRootUri, relativePath) ?: return ActionResult.Failed
-        diagnosticLogger.i(TAG, "Downloaded path=$relativePath size=${stat.sizeBytes}")
-        saveBaseline(ctx.folderPairId, relativePath, stat.sizeBytes, stat.lastModifiedEpochMillis)
-        return ActionResult.Downloaded
+            val stat = localFileIo.statOrNull(ctx.localRootUri, relativePath) ?: return ActionResult.Failed
+            diagnosticLogger.i(TAG, "Downloaded path=$relativePath size=${stat.sizeBytes}")
+            saveBaseline(ctx.folderPairId, relativePath, stat.sizeBytes, stat.lastModifiedEpochMillis)
+            baselined = true
+            return ActionResult.Downloaded
+        } catch (e: CancellationException) {
+            // Worker was stopped mid-stream: remove partial local bytes so the next pass downloads
+            // cleanly instead of treating a half-file as a local edit / conflict.
+            if (!baselined) {
+                runCatching { localFileIo.delete(ctx.localRootUri, relativePath) }
+                diagnosticLogger.i(TAG, "Removed partial download after cancel path=$relativePath")
+            }
+            throw e
+        }
     }
 
     /** Copies [input] to [output] in chunks, stopping early if more than [limitBytes] is read. Returns true if the limit was exceeded. */

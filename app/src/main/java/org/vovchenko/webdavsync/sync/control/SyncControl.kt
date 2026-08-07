@@ -6,17 +6,23 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Cooperative pause/cancel state for an in-flight sync (plan Phase 11 notification actions).
- * Reset at the start of each [org.vovchenko.webdavsync.sync.worker.SyncWorker] run.
+ * Cooperative pause/cancel state for an in-flight sync (plan Phase 11 notification actions),
+ * plus single-flight session tracking so instant-upload / folder-watch cannot REPLACE a running
+ * worker mid-transfer (that cancelled large downloads and re-ran as uploads → duplicates).
  */
 @Singleton
 class SyncControl @Inject constructor() {
 
     private val paused = AtomicBoolean(false)
     private val cancelled = AtomicBoolean(false)
+    private val sessionActive = AtomicBoolean(false)
+    private val followUpRequested = AtomicBoolean(false)
 
     val isPaused: Boolean get() = paused.get()
     val isCancelled: Boolean get() = cancelled.get()
+
+    /** True while [org.vovchenko.webdavsync.sync.worker.SyncWorker] is inside a sync pass. */
+    val isSessionActive: Boolean get() = sessionActive.get()
 
     /** True when the worker should stop starting new work (cancelled). */
     fun shouldStop(): Boolean = cancelled.get()
@@ -24,6 +30,35 @@ class SyncControl @Inject constructor() {
     fun reset() {
         paused.set(false)
         cancelled.set(false)
+    }
+
+    /**
+     * Marks a worker pass as active and clears pause/cancel for the new run.
+     * Call at the start of [org.vovchenko.webdavsync.sync.worker.SyncWorker.doWork].
+     *
+     * Does not clear [requestFollowUpSync] — requests made while work was only ENQUEUED
+     * (before this session started) must still run after [endSession].
+     */
+    fun beginSession() {
+        reset()
+        sessionActive.set(true)
+    }
+
+    /**
+     * Ends the active session. Returns whether a deferred sync was requested while this pass ran
+     * (folder changes during download/upload, or enqueue attempts that were coalesced).
+     */
+    fun endSession(): Boolean {
+        sessionActive.set(false)
+        return followUpRequested.getAndSet(false)
+    }
+
+    /**
+     * Ask for one more sync after the current session finishes instead of cancelling it.
+     * Safe to call when no session is active (consumed by the next [endSession] or ignored).
+     */
+    fun requestFollowUpSync() {
+        followUpRequested.set(true)
     }
 
     fun pause() {

@@ -13,8 +13,10 @@ import androidx.work.WorkManager
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import org.vovchenko.webdavsync.data.local.diagnostics.DiagnosticLogger
 import org.vovchenko.webdavsync.data.local.settings.AppSettings
 import org.vovchenko.webdavsync.data.repository.SettingsRepository
+import org.vovchenko.webdavsync.sync.control.SyncControl
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -24,6 +26,8 @@ import javax.inject.Singleton
 class SyncScheduler @Inject constructor(
     private val context: Context,
     private val settingsRepository: SettingsRepository,
+    private val syncControl: SyncControl,
+    private val diagnosticLogger: DiagnosticLogger,
 ) {
     private val workManager get() = WorkManager.getInstance(context)
 
@@ -47,8 +51,23 @@ class SyncScheduler @Inject constructor(
         )
     }
 
-    /** Triggers an immediate sync — either one folder pair (manual "Sync" action) or all enabled pairs. */
+    /**
+     * Triggers an immediate sync — either one folder pair or all enabled pairs.
+     *
+     * Never [ExistingWorkPolicy.REPLACE]s a running/queued pass: that cancelled mid-download
+     * transfers, left partial files, and the replacement pass treated them as local-only uploads
+     * (duplicates / conflicted copies). While busy we record a follow-up instead.
+     */
     suspend fun enqueueImmediateSync(folderPairId: Long? = null) {
+        if (syncControl.isSessionActive || hasActiveManualWork()) {
+            syncControl.requestFollowUpSync()
+            diagnosticLogger.i(
+                TAG,
+                "Coalesce immediate sync (sessionActive=${syncControl.isSessionActive}) pairId=${folderPairId ?: "all"}",
+            )
+            return
+        }
+
         val inputData = folderPairId?.let {
             Data.Builder().putLong(SyncWorker.KEY_FOLDER_PAIR_ID, it).build()
         } ?: Data.EMPTY
@@ -61,7 +80,38 @@ class SyncScheduler @Inject constructor(
             .setConstraints(buildConstraints(settings))
             .build()
 
-        workManager.enqueueUniqueWork(SyncWorker.UNIQUE_MANUAL_WORK_NAME, ExistingWorkPolicy.REPLACE, request)
+        workManager.enqueueUniqueWork(SyncWorker.UNIQUE_MANUAL_WORK_NAME, ExistingWorkPolicy.KEEP, request)
+    }
+
+    /**
+     * Chains one full sync after the current unique manual work finishes.
+     * Must not go through [enqueueImmediateSync] — that would see this worker still RUNNING and
+     * only set the follow-up flag again (infinite deferral).
+     */
+    suspend fun enqueueFollowUpIfNeeded(requested: Boolean) {
+        if (!requested) return
+        diagnosticLogger.i(TAG, "Enqueueing follow-up sync after completed pass")
+        val settings = settingsRepository.settings.first()
+        val request = OneTimeWorkRequestBuilder<SyncWorker>()
+            .setConstraints(buildConstraints(settings))
+            .build()
+        // APPEND runs after the finishing worker; APPEND_OR_REPLACE if the prior work was cancelled.
+        workManager.enqueueUniqueWork(
+            SyncWorker.UNIQUE_MANUAL_WORK_NAME,
+            ExistingWorkPolicy.APPEND_OR_REPLACE,
+            request,
+        )
+    }
+
+    private fun hasActiveManualWork(): Boolean {
+        val infos = runCatching {
+            workManager.getWorkInfosForUniqueWork(SyncWorker.UNIQUE_MANUAL_WORK_NAME).get()
+        }.getOrDefault(emptyList())
+        return infos.any {
+            it.state == WorkInfo.State.ENQUEUED ||
+                it.state == WorkInfo.State.RUNNING ||
+                it.state == WorkInfo.State.BLOCKED
+        }
     }
 
     /**
@@ -86,6 +136,7 @@ class SyncScheduler @Inject constructor(
         .build()
 
     private companion object {
+        private const val TAG = "SyncScheduler"
         const val MIN_INTERVAL_MINUTES = 15 // androidx.work.PeriodicWorkRequest's enforced floor
     }
 }

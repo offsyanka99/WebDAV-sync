@@ -75,6 +75,13 @@ class SyncMethodStrategyTest {
     }
 
     @Test
+    fun `two-way both new with same size but different mtime is not a conflict`() {
+        // After download, SAF mtime is "now" while remote keeps original Last-Modified.
+        val action = twoWay.computeFileAction("file.txt", local(200, 99_999), remote(200, 1000), null)
+        assertNull(action)
+    }
+
+    @Test
     fun `to-device ignores local-only files`() {
         val action = toDevice.computeFileAction("file.txt", local(100, 1000), null, null)
         assertNull(action)

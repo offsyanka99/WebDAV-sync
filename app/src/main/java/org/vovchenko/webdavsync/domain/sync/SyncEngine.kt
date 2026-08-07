@@ -2,11 +2,13 @@ package org.vovchenko.webdavsync.domain.sync
 
 import android.net.Uri
 import android.os.SystemClock
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import org.vovchenko.webdavsync.data.local.FolderPairEntity
 import org.vovchenko.webdavsync.data.local.SyncLogEntity
 import org.vovchenko.webdavsync.data.local.diagnostics.DiagnosticLogger
 import org.vovchenko.webdavsync.data.local.saf.LocalTreeScanner
+import org.vovchenko.webdavsync.data.local.saf.SafFolderAccess
 import org.vovchenko.webdavsync.data.model.SyncEventType
 import org.vovchenko.webdavsync.data.remote.WebDavClientFactory
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
@@ -33,6 +35,7 @@ class SyncEngine @Inject constructor(
     private val syncFileStateRepository: SyncFileStateRepository,
     private val clientFactory: WebDavClientFactory,
     private val localTreeScanner: LocalTreeScanner,
+    private val safFolderAccess: SafFolderAccess,
     private val remoteTreeScanner: RemoteTreeScanner,
     private val diffCalculator: SyncDiffCalculator,
     private val transferExecutor: TransferExecutor,
@@ -53,6 +56,21 @@ class SyncEngine @Inject constructor(
 
         return try {
             runSync(pair, wallStart, elapsedStart)
+        } catch (e: CancellationException) {
+            // Propagate so WorkManager can stop the worker; still record CANCELLED so Overview
+            // does not keep showing "Sync in process..." / a stale OK after a superseded pass.
+            val duration = SystemClock.elapsedRealtime() - elapsedStart
+            diagnosticLogger.i(TAG, "Sync cancelled (coroutine) for pair='${pair.name}' durationMs=$duration")
+            runCatching {
+                folderPairRepository.update(
+                    pair.copy(
+                        lastSyncAt = System.currentTimeMillis(),
+                        lastSyncDurationMs = duration,
+                        lastSyncStatus = "CANCELLED",
+                    ),
+                )
+            }
+            throw e
         } catch (e: Exception) {
             val duration = SystemClock.elapsedRealtime() - elapsedStart
             diagnosticLogger.e(TAG, "Sync crashed for pair id=${pair.id} name=${pair.name}", e)
@@ -101,9 +119,15 @@ class SyncEngine @Inject constructor(
         val client = clientFactory.create(account.baseUrl, authScheme, credentials, trustedCert)
 
         val localRootUri = Uri.parse(pair.localFolderUri)
+        // Without this check a revoked/lost SAF grant silently scans as "0 entries" and every
+        // local write then fails, which looks like a network/retry problem, not a permission one.
+        if (!safFolderAccess.hasAccess(localRootUri)) {
+            return failSync(pair, elapsedStart, "Local folder access lost — reselect the local folder in this folder pair's settings")
+        }
         val localEntries = runCatching {
             localTreeScanner.scan(localRootUri, pair.excludeHiddenFiles, pair.excludedSubfolders)
         }.getOrElse {
+            if (it is CancellationException) throw it
             diagnosticLogger.e(TAG, "Local scan failed for pair='${pair.name}'", it)
             return failSync(pair, elapsedStart, "Local folder scan failed: ${it.message}")
         }
@@ -179,6 +203,7 @@ class SyncEngine @Inject constructor(
     private suspend fun cleanEmptyFolders(pair: FolderPairEntity, client: org.vovchenko.webdavsync.data.remote.WebDavClient, localRootUri: Uri) {
         // Re-scan after transfers so newly-emptied directories are included.
         val localDirs = runCatching { localTreeScanner.scan(localRootUri, pair.excludeHiddenFiles, pair.excludedSubfolders) }
+            .onFailure { if (it is CancellationException) throw it }
             .getOrDefault(emptyList())
             .filter { it.isDirectory }
             .map { it.relativePath }

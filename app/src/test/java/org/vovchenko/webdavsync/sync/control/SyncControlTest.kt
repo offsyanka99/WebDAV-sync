@@ -42,6 +42,20 @@ class SyncControlTest {
     }
 
     @Test
+    fun `session tracks active pass and follow-up request`() {
+        val control = SyncControl()
+        assertFalse(control.isSessionActive)
+        control.beginSession()
+        assertTrue(control.isSessionActive)
+        control.requestFollowUpSync()
+        assertTrue(control.endSession())
+        assertFalse(control.isSessionActive)
+        // Second end without request → no follow-up.
+        control.beginSession()
+        assertFalse(control.endSession())
+    }
+
+    @Test
     fun `awaitWhilePaused returns after resume`() = runBlocking {
         val control = SyncControl()
         control.pause()

@@ -17,6 +17,7 @@ import org.vovchenko.webdavsync.data.local.saf.FolderChangeObserver
 import org.vovchenko.webdavsync.data.local.saf.LocalTreeScanner
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
 import org.vovchenko.webdavsync.data.repository.SettingsRepository
+import org.vovchenko.webdavsync.sync.control.SyncControl
 import org.vovchenko.webdavsync.sync.worker.SyncScheduler
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
@@ -27,6 +28,9 @@ import javax.inject.Singleton
  *
  * SAF [ContentObserver] alone is unreliable on many devices/providers, so we also **poll** a
  * lightweight local fingerprint (entry count + total size + max mtime) every few seconds.
+ *
+ * While a [SyncControl] session is active, fingerprint changes are absorbed (downloads write local
+ * files) and at most one follow-up sync is requested — never a mid-transfer REPLACE.
  */
 @Singleton
 class FolderChangeCoordinator @Inject constructor(
@@ -35,6 +39,7 @@ class FolderChangeCoordinator @Inject constructor(
     private val settingsRepository: SettingsRepository,
     private val debouncer: FolderChangeDebouncer,
     private val syncScheduler: SyncScheduler,
+    private val syncControl: SyncControl,
     private val localTreeScanner: LocalTreeScanner,
     private val diagnosticLogger: DiagnosticLogger,
     private val scope: CoroutineScope,
@@ -119,7 +124,12 @@ class FolderChangeCoordinator @Inject constructor(
                     val fp = fingerprint(pair)
                     val previous = fingerprints.put(id, fp)
                     if (previous != null && previous != fp) {
-                        scheduleSync(id, "poll fingerprint change $previous→$fp")
+                        // Growing/shrinking tree while we download is expected — do not log spam.
+                        if (syncControl.isSessionActive) {
+                            syncControl.requestFollowUpSync()
+                        } else {
+                            scheduleSync(id, "poll fingerprint change $previous→$fp")
+                        }
                     }
                 }
             }
@@ -127,6 +137,14 @@ class FolderChangeCoordinator @Inject constructor(
     }
 
     private fun scheduleSync(folderPairId: Long, reason: String) {
+        // Downloads/uploads rewrite the local tree; never start a competing worker mid-pass.
+        if (syncControl.isSessionActive) {
+            watchedPairs[folderPairId]?.let { fingerprints[folderPairId] = fingerprint(it) }
+            syncControl.requestFollowUpSync()
+            diagnosticLogger.i(TAG, "Defer local change during active sync pairId=$folderPairId ($reason)")
+            return
+        }
+
         // Ignore fingerprint noise right after a sync finishes (downloads change the local tree
         // and used to enqueue a near-empty follow-up sync that overwrote Duration with ~0s).
         val now = SystemClock.elapsedRealtime()
@@ -136,6 +154,12 @@ class FolderChangeCoordinator @Inject constructor(
             return
         }
         debouncer.onChangeDetected(folderPairId, DEBOUNCE_MS) { id ->
+            if (syncControl.isSessionActive) {
+                watchedPairs[id]?.let { fingerprints[id] = fingerprint(it) }
+                syncControl.requestFollowUpSync()
+                diagnosticLogger.i(TAG, "Defer debounced change during active sync pairId=$id ($reason)")
+                return@onChangeDetected
+            }
             lastTriggerAt[id] = SystemClock.elapsedRealtime()
             diagnosticLogger.i(TAG, "Local change → sync pairId=$id ($reason)")
             syncScheduler.enqueueImmediateSync(id)

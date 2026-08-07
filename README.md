@@ -2,7 +2,7 @@
 
 Android app that keeps local folders and WebDAV remote folders in sync — manually, on a schedule, or when files change.
 
-**Current release:** [v1.0.14](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.0.14)  
+**Current release:** [v1.0.15](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.0.15)  
 **Min Android:** 8.0 (API 26)  
 **License:** [MIT](LICENSE)
 
@@ -15,7 +15,7 @@ Android app that keeps local folders and WebDAV remote folders in sync — manua
   - **To the device** — remote → local only
   - **To the cloud** — local → remote only
 - **Background sync** via WorkManager (periodic + manual + boot reschedule)
-- **Instant upload** when local changes are detected (optional per pair)
+- **Instant upload** when local changes are detected (optional per pair), coalesced so it never interrupts an in-flight pass
 - **Foreground notification** with pause / resume / cancel during sync
 - **Size limits** for upload and download
 - **Wi‑Fi only**, mobile-data warning, parallel transfers, retries
@@ -105,12 +105,17 @@ Core flow: scan local + remote → diff against last-sync baseline → transfer/
 
 ## Changelog (recent)
 
-### v1.0.14
+### v1.0.15
 
+- **Fix large multi-file sync race**: local folder watch no longer cancels an in-flight sync when downloads rewrite the tree (that caused duplicate uploads, conflicted copies, and stuck “Sync in process…”)
+- **Single-flight WorkManager passes** with one coalesced follow-up instead of `REPLACE` mid-transfer
+- **Two-way size match** after download ignores SAF vs remote mtime skew (false conflicts)
+- Remove partial local files if a download is cancelled mid-stream
 - **Status colors** on Overview and home widget: OK / Ready green, syncing yellow, ERROR red
-- **SAF name sanitization** — when local storage rewrites unsafe characters in remote names (e.g. `?` → `_`), sync keeps the real remote path so files are not re-downloaded or mis-matched every pass
-- Widget Sync button styling aligned with the rest of the UI
-- Contact email updated
+- **SAF name sanitization** for remote names rewritten by local storage (e.g. `?` → `_`)
+- Widget Sync button styling polish; contact email update
+
+> **Note:** v1.0.14 was withdrawn — it contained the mid-sync replace bug above. Prefer v1.0.15.
 
 ### v1.0.12
 

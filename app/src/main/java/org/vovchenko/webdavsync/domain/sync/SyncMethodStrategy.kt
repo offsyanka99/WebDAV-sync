@@ -85,9 +85,11 @@ sealed interface SyncMethodStrategy {
                 // One side deleted, the other modified → resurrect the modified side (§4.2), not a rename-conflict.
                 lState == ChangeState.DELETED -> SyncAction.DownloadFile(relativePath, remote?.sizeBytes ?: 0L, remotePath)
                 rState == ChangeState.DELETED -> SyncAction.UploadFile(relativePath, remotePath)
-                // Both created/modified independently: if they happen to match, just adopt — else true conflict.
-                local != null && remote != null && local.sizeBytes == remote.sizeBytes &&
-                    mtimesClose(local.lastModifiedEpochMillis, remote.lastModifiedEpochMillis) -> null
+                // Both created/modified independently: size match → same content for our purposes.
+                // Do NOT require mtimesClose: after a download SAF stamps local mtime as "now" while
+                // remote keeps the original Last-Modified, which falsely looked like a conflict and
+                // triggered upload + "conflicted copy" duplicates on the next pass.
+                local != null && remote != null && local.sizeBytes == remote.sizeBytes -> null
                 else -> SyncAction.Conflict(relativePath, pickWinner(local, remote), remotePath)
             }
         }
