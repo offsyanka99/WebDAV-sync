@@ -77,11 +77,11 @@ sealed interface SyncMethodStrategy {
                 }
                 lState == ChangeState.UNCHANGED && rState != ChangeState.UNCHANGED -> when (rState) {
                     ChangeState.DELETED -> SyncAction.DeleteLocalFile(relativePath)
-                    else -> SyncAction.DownloadFile(relativePath)
+                    else -> SyncAction.DownloadFile(relativePath, remote?.sizeBytes ?: 0L)
                 }
                 lState == ChangeState.DELETED && rState == ChangeState.DELETED -> null
                 // One side deleted, the other modified → resurrect the modified side (§4.2), not a rename-conflict.
-                lState == ChangeState.DELETED -> SyncAction.DownloadFile(relativePath)
+                lState == ChangeState.DELETED -> SyncAction.DownloadFile(relativePath, remote?.sizeBytes ?: 0L)
                 rState == ChangeState.DELETED -> SyncAction.UploadFile(relativePath)
                 // Both created/modified independently: if they happen to match, just adopt — else true conflict.
                 local != null && remote != null && local.sizeBytes == remote.sizeBytes &&
@@ -100,9 +100,9 @@ sealed interface SyncMethodStrategy {
             baseline: SyncFileStateEntity?,
         ): SyncAction? = when {
             remote == null -> if (baseline != null && local != null) SyncAction.DeleteLocalFile(relativePath) else null
-            local == null -> SyncAction.DownloadFile(relativePath)
+            local == null -> SyncAction.DownloadFile(relativePath, remote.sizeBytes)
             local.sizeBytes == remote.sizeBytes && mtimesClose(local.lastModifiedEpochMillis, remote.lastModifiedEpochMillis) -> null
-            else -> SyncAction.DownloadFile(relativePath)
+            else -> SyncAction.DownloadFile(relativePath, remote.sizeBytes)
         }
     }
 

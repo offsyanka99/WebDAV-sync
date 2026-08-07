@@ -70,7 +70,7 @@ private fun WebDavSyncAppContent() {
             modifier = Modifier.padding(innerPadding),
         ) {
             composable(BottomDestination.Overview.route) {
-                OverviewScreen(onAddFolderClick = { navController.navigate("folders/add") })
+                OverviewScreen()
             }
             composable(BottomDestination.Folders.route) {
                 FoldersScreen(

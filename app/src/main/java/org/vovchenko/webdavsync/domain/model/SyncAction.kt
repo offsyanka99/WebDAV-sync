@@ -5,7 +5,8 @@ sealed class SyncAction {
     abstract val relativePath: String
 
     data class UploadFile(override val relativePath: String) : SyncAction()
-    data class DownloadFile(override val relativePath: String) : SyncAction()
+    /** [remoteSizeBytes] from PROPFIND; used to enforce download size limits before streaming. */
+    data class DownloadFile(override val relativePath: String, val remoteSizeBytes: Long = 0L) : SyncAction()
     data class DeleteLocalFile(override val relativePath: String) : SyncAction()
     data class DeleteRemoteFile(override val relativePath: String) : SyncAction()
     data class CreateLocalDirectory(override val relativePath: String) : SyncAction()

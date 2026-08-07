@@ -8,7 +8,10 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import org.vovchenko.webdavsync.data.local.settings.AppSettings
 import org.vovchenko.webdavsync.data.repository.SettingsRepository
@@ -60,6 +63,22 @@ class SyncScheduler @Inject constructor(
 
         workManager.enqueueUniqueWork(SyncWorker.UNIQUE_MANUAL_WORK_NAME, ExistingWorkPolicy.REPLACE, request)
     }
+
+    /**
+     * True while a sync worker is running, or a manual sync is queued/blocked on constraints.
+     * Periodic work sitting ENQUEUED until the next interval is ignored (that is idle waiting).
+     */
+    fun observeIsSyncActive(): Flow<Boolean> = combine(
+        workManager.getWorkInfosForUniqueWorkFlow(SyncWorker.UNIQUE_MANUAL_WORK_NAME),
+        workManager.getWorkInfosForUniqueWorkFlow(SyncWorker.UNIQUE_PERIODIC_WORK_NAME),
+    ) { manual, periodic ->
+        manual.any { it.state.isActiveForManual } || periodic.any { it.state == WorkInfo.State.RUNNING }
+    }
+
+    private val WorkInfo.State.isActiveForManual: Boolean
+        get() = this == WorkInfo.State.ENQUEUED ||
+            this == WorkInfo.State.RUNNING ||
+            this == WorkInfo.State.BLOCKED
 
     private fun buildConstraints(settings: AppSettings): Constraints = Constraints.Builder()
         .setRequiredNetworkType(if (settings.wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED)

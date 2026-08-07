@@ -101,6 +101,7 @@ class TransferExecutor @Inject constructor(
         var deletedLocal = 0
         var deletedRemote = 0
         var conflicts = 0
+        var skipped = 0
         var errors = directoryErrors
         for (result in results) {
             when (result) {
@@ -112,7 +113,7 @@ class TransferExecutor @Inject constructor(
                     conflicts++
                     if (result.winningSide == SyncAction.Side.LOCAL) uploaded++ else downloaded++
                 }
-                ActionResult.Skipped -> Unit
+                ActionResult.Skipped -> skipped++
                 ActionResult.Failed -> errors++
             }
         }
@@ -120,8 +121,8 @@ class TransferExecutor @Inject constructor(
         diagnosticLogger.i(
             TAG,
             "Transfers done pairId=${ctx.folderPairId}: up=$uploaded down=$downloaded " +
-                "delLocal=$deletedLocal delRemote=$deletedRemote conflicts=$conflicts errors=$errors " +
-                "cancelled=${syncControl.isCancelled}",
+                "delLocal=$deletedLocal delRemote=$deletedRemote conflicts=$conflicts skipped=$skipped " +
+                "errors=$errors cancelled=${syncControl.isCancelled}",
         )
 
         return SyncOutcome(
@@ -132,6 +133,7 @@ class TransferExecutor @Inject constructor(
             conflicts = conflicts,
             errors = errors,
             cancelled = syncControl.isCancelled,
+            skipped = skipped,
         )
     }
 
@@ -173,7 +175,7 @@ class TransferExecutor @Inject constructor(
 
     private suspend fun executeFileAction(action: SyncAction, ctx: TransferContext): ActionResult = when (action) {
         is SyncAction.UploadFile -> uploadFile(action.relativePath, ctx)
-        is SyncAction.DownloadFile -> downloadFile(action.relativePath, ctx)
+        is SyncAction.DownloadFile -> downloadFile(action.relativePath, action.remoteSizeBytes, ctx)
         is SyncAction.DeleteLocalFile -> deleteLocalFile(action.relativePath, ctx)
         is SyncAction.DeleteRemoteFile -> deleteRemoteFile(action.relativePath, ctx)
         is SyncAction.Conflict -> resolveConflict(action, ctx)
@@ -182,6 +184,10 @@ class TransferExecutor @Inject constructor(
 
     private suspend fun uploadFile(relativePath: String, ctx: TransferContext): ActionResult {
         val local = localFileIo.statOrNull(ctx.localRootUri, relativePath) ?: return ActionResult.Failed
+        if (local.sizeBytes <= 0L) {
+            diagnosticLogger.w(TAG, "Skip upload of empty local file path=$relativePath")
+            return ActionResult.Skipped
+        }
         if (ctx.uploadSizeLimitBytes != null && local.sizeBytes > ctx.uploadSizeLimitBytes) {
             diagnosticLogger.i(TAG, "Skip upload (size limit) path=$relativePath size=${local.sizeBytes}")
             return ActionResult.Skipped
@@ -196,36 +202,59 @@ class TransferExecutor @Inject constructor(
             return ActionResult.Failed
         }
 
-        diagnosticLogger.i(TAG, "Uploaded path=$relativePath size=${local.sizeBytes}")
-        saveBaseline(ctx.folderPairId, relativePath, local.sizeBytes, local.lastModifiedEpochMillis)
+        // Re-stat after upload: never treat a wiped/empty local file as a successful transfer.
+        val after = localFileIo.statOrNull(ctx.localRootUri, relativePath)
+        if (after == null || after.sizeBytes <= 0L) {
+            diagnosticLogger.e(
+                TAG,
+                "Local file empty after upload path=$relativePath (was ${local.sizeBytes} bytes) — not updating baseline",
+            )
+            return ActionResult.Failed
+        }
+
+        diagnosticLogger.i(TAG, "Uploaded path=$relativePath size=${after.sizeBytes}")
+        saveBaseline(ctx.folderPairId, relativePath, after.sizeBytes, after.lastModifiedEpochMillis)
         return ActionResult.Uploaded
     }
 
-    private suspend fun downloadFile(relativePath: String, ctx: TransferContext): ActionResult {
+    private suspend fun downloadFile(relativePath: String, remoteSizeBytes: Long, ctx: TransferContext): ActionResult {
+        val limit = ctx.downloadSizeLimitBytes
+        // Enforce limit before streaming so oversized files never count as downloads and never
+        // touch local storage (partial write + delete was easy to misread as a "Download").
+        if (limit != null && remoteSizeBytes > 0L && remoteSizeBytes > limit) {
+            diagnosticLogger.i(
+                TAG,
+                "Skip download (size limit) path=$relativePath size=$remoteSizeBytes limit=$limit",
+            )
+            return ActionResult.Skipped
+        }
+
         val remotePath = RemotePaths.join(ctx.remoteRootPath, relativePath)
         val downloadResult = ctx.client.download(remotePath)
         val remoteStream = downloadResult.getOrElse {
             diagnosticLogger.w(TAG, "Download failed path=$relativePath: ${it.message}")
             return ActionResult.Failed
         }
-        val limit = ctx.downloadSizeLimitBytes
         var limitExceeded = false
-        val output = remoteStream.use { input ->
+        val wrote = remoteStream.use { input ->
             localFileIo.openOutputStream(ctx.localRootUri, relativePath)?.use { out ->
                 if (limit != null) {
                     limitExceeded = copyLimited(input, out, limit)
+                    !limitExceeded
                 } else {
                     input.copyTo(out)
+                    true
                 }
-            }
+            } ?: false
         }
-        if (output == null) return ActionResult.Failed
-        if (limitExceeded) {
-            // Security audit finding #3: don't leave a truncated partial file on disk when the
-            // download is aborted for exceeding the configured size limit.
+        if (!wrote || limitExceeded) {
+            // Security audit finding #3: don't leave a truncated partial file on disk.
             localFileIo.delete(ctx.localRootUri, relativePath)
-            diagnosticLogger.i(TAG, "Skip download (size limit) path=$relativePath limit=$limit")
-            return ActionResult.Skipped
+            if (limitExceeded) {
+                diagnosticLogger.i(TAG, "Skip download (size limit while streaming) path=$relativePath limit=$limit")
+                return ActionResult.Skipped
+            }
+            return ActionResult.Failed
         }
 
         val stat = localFileIo.statOrNull(ctx.localRootUri, relativePath) ?: return ActionResult.Failed
@@ -288,7 +317,7 @@ class TransferExecutor @Inject constructor(
 
         val applied = when (action.winningSide) {
             SyncAction.Side.LOCAL -> uploadFile(relativePath, ctx)
-            SyncAction.Side.REMOTE -> downloadFile(relativePath, ctx)
+            SyncAction.Side.REMOTE -> downloadFile(relativePath, remoteSizeBytes = 0L, ctx)
         }
         return if (applied is ActionResult.Failed) {
             ActionResult.Failed

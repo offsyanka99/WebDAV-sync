@@ -1,7 +1,9 @@
 package org.vovchenko.webdavsync.domain.sync
 
 import org.vovchenko.webdavsync.data.local.saf.PathExclusion
+import org.vovchenko.webdavsync.data.remote.DavHref
 import org.vovchenko.webdavsync.data.remote.WebDavClient
+import org.vovchenko.webdavsync.data.remote.WebDavPathSafety
 import javax.inject.Inject
 
 /** One remote file/folder entry, relative to a folder pair's remote root. */
@@ -35,12 +37,18 @@ class RemoteTreeScanner @Inject constructor() {
         out: MutableList<RemoteFileEntry>,
     ): Throwable? {
         val children = client.list(remotePath).getOrElse { return it }
+        val parentNormalized = WebDavPathSafety.sanitize(remotePath)
+
         for (resource in children) {
-            val name = resource.path.trimEnd('/').substringAfterLast('/')
-            if (name.isEmpty()) continue
+            // Decode last segment so "test%201" / "test 1" both become "test 1".
+            val name = DavHref.childName(resource.path) ?: continue
 
             val relativePath = if (relativePrefix.isEmpty()) name else "$relativePrefix/$name"
             if (PathExclusion.isExcluded(relativePath, excludedSubfolders)) continue
+
+            val childRemotePath = RemotePaths.join(remotePath, name)
+            // Defensive: never re-enter the same collection (encoding mismatches can still leak self).
+            if (WebDavPathSafety.sanitize(childRemotePath) == parentNormalized) continue
 
             out.add(
                 RemoteFileEntry(
@@ -53,7 +61,6 @@ class RemoteTreeScanner @Inject constructor() {
             )
 
             if (resource.isDirectory) {
-                val childRemotePath = RemotePaths.join(remotePath, name)
                 val failure = walk(client, childRemotePath, relativePath, excludedSubfolders, out)
                 if (failure != null) return failure
             }

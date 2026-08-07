@@ -7,10 +7,11 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface SyncLogDao {
-    @Query("SELECT * FROM sync_log WHERE folderPairId = :folderPairId ORDER BY timestamp DESC")
+    @Query("SELECT * FROM sync_log WHERE folderPairId = :folderPairId ORDER BY timestamp DESC, id DESC")
     fun observeForFolderPair(folderPairId: Long): Flow<List<SyncLogEntity>>
 
-    @Query("SELECT * FROM sync_log ORDER BY timestamp DESC LIMIT :limit")
+    // id DESC breaks ties when several rows share one millisecond (common in logOutcome batches).
+    @Query("SELECT * FROM sync_log ORDER BY timestamp DESC, id DESC LIMIT :limit")
     fun observeRecent(limit: Int = 100): Flow<List<SyncLogEntity>>
 
     @Insert

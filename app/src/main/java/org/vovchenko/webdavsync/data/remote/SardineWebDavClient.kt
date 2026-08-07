@@ -5,12 +5,11 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
-import okio.BufferedSink
-import okio.source
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
+import java.io.File
 import java.io.InputStream
 import java.io.StringReader
 
@@ -21,6 +20,7 @@ import java.io.StringReader
 class SardineWebDavClient(
     private val okHttpClient: OkHttpClient,
     private val baseUrl: String,
+    private val uploadCacheDir: File,
 ) : WebDavClient {
 
     private val sardine by lazy { OkHttpSardine(okHttpClient) }
@@ -55,10 +55,13 @@ class SardineWebDavClient(
 
     override suspend fun list(remotePath: String): Result<List<WebDavResource>> = runCatchingWebDav {
         val targetUrl = resolve(remotePath, asCollection = true)
-        val targetPath = targetUrl.toHttpUrlOrNull()?.encodedPath?.trimEnd('/')
         try {
+            // Depth:1 PROPFIND always echoes the collection itself as the first multistatus
+            // response. Filter it out using encoding-tolerant path comparison — a strict string
+            // match fails when the server returns `test 2` and we requested `test%202`, which
+            // previously made the scanner recurse into `test 2/test 2` and 404.
             sardine.list(targetUrl)
-                .filter { resource -> targetPath == null || resource.path.trimEnd('/') != targetPath }
+                .filter { resource -> !DavHref.isSelf(resource.path, targetUrl) }
                 .map { resource ->
                     WebDavResource(
                         path = resource.path,
@@ -79,21 +82,34 @@ class SardineWebDavClient(
 
     override suspend fun upload(remotePath: String, contentType: String, content: InputStream): Result<Unit> =
         runCatchingWebDav {
-            // Streams straight from the SAF InputStream instead of buffering the whole file into a
-            // ByteArray first (security audit finding #4 — large files could otherwise OOM the
-            // process). Sardine's public API has no InputStream-streaming `put()` overload, so this
-            // issues the PUT directly via the shared OkHttpClient.
-            val body = object : RequestBody() {
-                override fun contentType() = contentType.toMediaTypeOrNull()
-                override fun writeTo(sink: BufferedSink) {
-                    content.source().use { source -> sink.writeAll(source) }
+            // P0: never wrap a one-shot SAF InputStream directly in RequestBody.
+            // OkHttp may call writeTo() more than once (Digest 401 challenge/retry, internal
+            // retries). The first pass drained the stream; the second sent 0 bytes → empty files
+            // on the server, then two-way sync could download that empty file back and wipe local.
+            // Copy to a cache file once so the body is re-readable and has a known Content-Length.
+            if (!uploadCacheDir.exists()) uploadCacheDir.mkdirs()
+            val temp = File.createTempFile("webdav-upload-", ".bin", uploadCacheDir)
+            try {
+                content.use { input ->
+                    temp.outputStream().buffered().use { output -> input.copyTo(output) }
                 }
-            }
-            val request = Request.Builder().url(resolve(remotePath, asCollection = false)).put(body).build()
-            okHttpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    throw java.io.IOException("PUT failed: HTTP ${response.code}")
+                val length = temp.length()
+                if (length == 0L) {
+                    throw java.io.IOException("Refusing to upload empty body for $remotePath (source produced 0 bytes)")
                 }
+                val body = temp.asRequestBody(contentType.toMediaTypeOrNull())
+                val request = Request.Builder()
+                    .url(resolve(remotePath, asCollection = false))
+                    .put(body)
+                    .header("Content-Length", length.toString())
+                    .build()
+                okHttpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw java.io.IOException("PUT failed: HTTP ${response.code} for $remotePath (${length} bytes)")
+                    }
+                }
+            } finally {
+                temp.delete()
             }
         }
 
@@ -139,22 +155,37 @@ class SardineWebDavClient(
         parser.setInput(StringReader(xml))
 
         var eventType = parser.eventType
-        var currentTag: String? = null
         while (eventType != XmlPullParser.END_DOCUMENT) {
-            when (eventType) {
-                XmlPullParser.START_TAG -> currentTag = parser.name
-                XmlPullParser.TEXT -> {
-                    when (currentTag?.substringAfterLast(':')) {
-                        "quota-available-bytes" -> available = parser.text.trim().toLongOrNull()
-                        "quota-used-bytes" -> used = parser.text.trim().toLongOrNull()
+            if (eventType == XmlPullParser.START_TAG) {
+                when (parser.name.substringAfterLast(':').lowercase()) {
+                    "quota-available-bytes" -> {
+                        val text = runCatching { parser.nextText().trim() }.getOrNull()
+                        available = parseQuotaNumber(text) ?: available
+                        eventType = parser.eventType
+                        continue
+                    }
+                    "quota-used-bytes" -> {
+                        val text = runCatching { parser.nextText().trim() }.getOrNull()
+                        used = parseQuotaNumber(text) ?: used
+                        eventType = parser.eventType
+                        continue
                     }
                 }
-                XmlPullParser.END_TAG -> currentTag = null
             }
             eventType = parser.next()
         }
 
         return WebDavQuota(availableBytes = available, usedBytes = used)
+    }
+
+    /**
+     * RFC 4331: negative sentinels mean unknown/unlimited (-1 unknown, -2 not determined, -3 unlimited).
+     * Treat those as missing so we do not show "10 GB free of 10 GB" from a bogus total.
+     */
+    private fun parseQuotaNumber(text: String?): Long? {
+        if (text.isNullOrBlank()) return null
+        val value = text.toLongOrNull() ?: return null
+        return if (value < 0L) null else value
     }
 
     private companion object {

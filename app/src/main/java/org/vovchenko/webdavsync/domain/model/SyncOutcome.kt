@@ -11,6 +11,8 @@ data class SyncOutcome(
     val durationMs: Long = 0,
     /** True when the user cancelled via notification action mid-pass. */
     val cancelled: Boolean = false,
+    /** Files skipped (e.g. size limit) — not counted as uploads/downloads. */
+    val skipped: Int = 0,
 ) {
     val hasErrors: Boolean get() = errors > 0 && !cancelled
     val totalChanges: Int get() = uploaded + downloaded + deletedLocal + deletedRemote

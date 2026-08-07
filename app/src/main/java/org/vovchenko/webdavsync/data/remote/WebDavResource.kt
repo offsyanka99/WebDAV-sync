@@ -14,5 +14,14 @@ data class WebDavQuota(
     val availableBytes: Long?,
     val usedBytes: Long?,
 ) {
-    val totalBytes: Long? get() = if (availableBytes != null && usedBytes != null) availableBytes + usedBytes else null
+    /**
+     * Total capacity. RFC 4331 only defines available + used; some servers return sentinel
+     * values (-1 / -2 / -3) which we treat as unknown.
+     */
+    val totalBytes: Long?
+        get() {
+            val free = availableBytes?.takeIf { it >= 0 }
+            val used = usedBytes?.takeIf { it >= 0 }
+            return if (free != null && used != null) free + used else null
+        }
 }

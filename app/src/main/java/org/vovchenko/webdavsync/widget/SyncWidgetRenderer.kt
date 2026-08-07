@@ -13,7 +13,7 @@ import org.vovchenko.webdavsync.ui.components.Formatters
 object SyncWidgetRenderer {
 
     fun build(context: Context, state: SyncWidgetState): RemoteViews {
-        val views = RemoteViews(context.packageName, R.layout.widget_sync_4x2)
+        val views = RemoteViews(context.packageName, R.layout.widget_sync_4x1)
 
         val (statusText, statusColorRes) = when {
             state.syncing -> context.getString(R.string.widget_status_syncing) to R.color.status_warn

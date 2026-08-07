@@ -10,9 +10,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import org.vovchenko.webdavsync.data.model.SyncEventType
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
 import org.vovchenko.webdavsync.data.repository.SyncLogRepository
+import org.vovchenko.webdavsync.domain.sync.RecentChangesCalculator
 
 /**
  * 4×2 home-screen widget: last sync status, recent change counts, and a Sync button.
@@ -92,16 +92,15 @@ class SyncWidgetProvider : AppWidgetProvider() {
             val folderPairs = folderPairRepository.observeAll().first()
             val logs = syncLogRepository.observeRecent(100).first()
             val mostRecentPair = folderPairs.filter { it.lastSyncAt != null }.maxByOrNull { it.lastSyncAt!! }
-            val latestSyncEndTimestamp = logs.firstOrNull { it.eventType == SyncEventType.SYNC_END }?.timestamp
-            val latestBatch = logs.filter { it.timestamp == latestSyncEndTimestamp }
+            val recent = RecentChangesCalculator.fromLogs(logs)
             return SyncWidgetState(
                 status = mostRecentPair?.lastSyncStatus ?: "Ready",
                 lastSyncAtMillis = mostRecentPair?.lastSyncAt,
                 lastSyncDurationMs = mostRecentPair?.lastSyncDurationMs,
-                uploaded = latestBatch.firstOrNull { it.eventType == SyncEventType.UPLOAD }?.fileCount ?: 0,
-                downloaded = latestBatch.firstOrNull { it.eventType == SyncEventType.DOWNLOAD }?.fileCount ?: 0,
-                deletedDevice = latestBatch.firstOrNull { it.eventType == SyncEventType.DELETE_DEVICE }?.fileCount ?: 0,
-                deletedCloud = latestBatch.firstOrNull { it.eventType == SyncEventType.DELETE_CLOUD }?.fileCount ?: 0,
+                uploaded = recent.uploaded,
+                downloaded = recent.downloaded,
+                deletedDevice = recent.deletedDevice,
+                deletedCloud = recent.deletedCloud,
             )
         }
 

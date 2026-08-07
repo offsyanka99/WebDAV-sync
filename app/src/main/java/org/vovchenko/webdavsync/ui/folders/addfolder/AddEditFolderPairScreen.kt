@@ -189,7 +189,6 @@ fun AddEditFolderPairScreen(
             ToggleRow(label = "Exclude hidden files", checked = form.excludeHiddenFiles, onCheckedChange = viewModel::setExcludeHiddenFiles)
             ToggleRow(label = "Delete empty folders", checked = form.deleteEmptyFolders, onCheckedChange = viewModel::setDeleteEmptyFolders)
             ToggleRow(label = "Instant upload", checked = form.instantUpload, onCheckedChange = viewModel::setInstantUpload)
-            ToggleRow(label = "Enabled", checked = form.enabled, onCheckedChange = viewModel::setEnabled)
 
             Text("Excluded subfolders", style = MaterialTheme.typography.titleSmall)
             form.excludedSubfolders.forEachIndexed { index, path ->
@@ -213,7 +212,7 @@ fun AddEditFolderPairScreen(
                     value = newExcludedPath,
                     onValueChange = { newExcludedPath = it },
                     label = { Text("e.g. .thumbnails or node_modules/**") },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.weight(1f),
                     singleLine = true,
                 )
                 TextButton(onClick = {
@@ -223,6 +222,8 @@ fun AddEditFolderPairScreen(
                     Text("Add")
                 }
             }
+
+            ToggleRow(label = "Enabled", checked = form.enabled, onCheckedChange = viewModel::setEnabled)
 
             Button(onClick = viewModel::save, enabled = form.canSave, modifier = Modifier.fillMaxWidth()) {
                 Text("Save")

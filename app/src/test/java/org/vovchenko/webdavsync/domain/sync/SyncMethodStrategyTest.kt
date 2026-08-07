@@ -26,7 +26,7 @@ class SyncMethodStrategyTest {
     @Test
     fun `two-way new remote file is downloaded`() {
         val action = twoWay.computeFileAction("file.txt", null, remote(100, 1000), null)
-        assertEquals(SyncAction.DownloadFile("file.txt"), action)
+        assertEquals(SyncAction.DownloadFile("file.txt", remoteSizeBytes = 100), action)
     }
 
     @Test
@@ -57,7 +57,7 @@ class SyncMethodStrategyTest {
         val base = baseline(100, 1000)
         // Local deleted it, remote content size changed since baseline -> resurrect (download), not delete.
         val action = twoWay.computeFileAction("file.txt", null, remote(200, 5000), base)
-        assertEquals(SyncAction.DownloadFile("file.txt"), action)
+        assertEquals(SyncAction.DownloadFile("file.txt", remoteSizeBytes = 200), action)
     }
 
     @Test
@@ -83,7 +83,7 @@ class SyncMethodStrategyTest {
     @Test
     fun `to-device downloads remote-only files`() {
         val action = toDevice.computeFileAction("file.txt", null, remote(100, 1000), null)
-        assertEquals(SyncAction.DownloadFile("file.txt"), action)
+        assertEquals(SyncAction.DownloadFile("file.txt", remoteSizeBytes = 100), action)
     }
 
     @Test

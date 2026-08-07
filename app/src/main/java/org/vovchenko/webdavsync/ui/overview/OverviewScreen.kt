@@ -6,14 +6,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -29,31 +27,27 @@ import org.vovchenko.webdavsync.ui.components.SectionCard
 @Composable
 fun OverviewScreen(
     modifier: Modifier = Modifier,
-    onAddFolderClick: () -> Unit = {},
     viewModel: OverviewViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val showMobileWarning by viewModel.showMobileDataWarning.collectAsState()
 
     Scaffold(
         modifier = modifier,
         topBar = {
             TopAppBar(
                 title = { Text("WebDAV-Sync") },
-                actions = {
-                    IconButton(onClick = onAddFolderClick) {
-                        Icon(imageVector = Icons.Filled.Add, contentDescription = "Add folder pair")
-                    }
-                },
             )
         },
         bottomBar = {
             Button(
-                onClick = viewModel::syncNow,
+                onClick = viewModel::requestSync,
+                enabled = !uiState.syncing,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(16.dp),
             ) {
-                Text("Sync")
+                Text(if (uiState.syncing) "Syncing…" else "Sync")
             }
         },
     ) { innerPadding ->
@@ -68,7 +62,7 @@ fun OverviewScreen(
                 SectionCard(title = "Sync status") {
                     LabeledRow(label = "Last sync", value = Formatters.timestamp(uiState.lastSyncAtMillis))
                     LabeledRow(label = "Duration", value = Formatters.duration(uiState.lastSyncDurationMs))
-                    LabeledRow(label = "Status", value = uiState.lastSyncStatus ?: "Ready")
+                    LabeledRow(label = "Status", value = uiState.statusDisplay)
                 }
             }
             item {
@@ -89,13 +83,32 @@ fun OverviewScreen(
                             LabeledRow(label = "Server", value = account.baseUrl)
                             LabeledRow(
                                 label = "Storage",
-                                value = "${Formatters.bytes(account.storageAvailableBytes)} free of " +
-                                    Formatters.bytes(account.storageQuotaBytes),
+                                value = Formatters.storageSummary(
+                                    available = account.storageAvailableBytes,
+                                    used = null,
+                                    total = account.storageQuotaBytes,
+                                ),
                             )
                         }
                     }
                 }
             }
         }
+    }
+
+    if (showMobileWarning) {
+        AlertDialog(
+            onDismissRequest = viewModel::dismissMobileDataWarning,
+            title = { Text("Sync on mobile data?") },
+            text = {
+                Text("You are on a mobile network. Syncing may use cellular data. Continue?")
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmMobileDataSync) { Text("Sync anyway") }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::dismissMobileDataWarning) { Text("Cancel") }
+            },
+        )
     }
 }

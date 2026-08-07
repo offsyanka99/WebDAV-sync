@@ -1,6 +1,7 @@
 package org.vovchenko.webdavsync.domain.sync
 
 import android.net.Uri
+import android.os.SystemClock
 import kotlinx.coroutines.flow.first
 import org.vovchenko.webdavsync.data.local.FolderPairEntity
 import org.vovchenko.webdavsync.data.local.SyncLogEntity
@@ -40,18 +41,20 @@ class SyncEngine @Inject constructor(
     private val diagnosticLogger: DiagnosticLogger,
 ) {
     suspend fun sync(folderPairId: Long): SyncOutcome {
-        val startedAt = System.currentTimeMillis()
+        // Wall-clock start for "Last sync" timestamp; elapsedRealtime for duration (immune to clock skew).
+        val wallStart = System.currentTimeMillis()
+        val elapsedStart = SystemClock.elapsedRealtime()
         val pair = folderPairRepository.observeById(folderPairId).first()
-            ?: return SyncOutcome(errors = 1, durationMs = System.currentTimeMillis() - startedAt)
-        if (!pair.enabled) return SyncOutcome(durationMs = System.currentTimeMillis() - startedAt)
+            ?: return SyncOutcome(errors = 1, durationMs = SystemClock.elapsedRealtime() - elapsedStart)
+        if (!pair.enabled) return SyncOutcome(durationMs = 0)
         if (syncControl.shouldStop()) {
-            return SyncOutcome(durationMs = System.currentTimeMillis() - startedAt, cancelled = true)
+            return SyncOutcome(durationMs = SystemClock.elapsedRealtime() - elapsedStart, cancelled = true)
         }
 
         return try {
-            runSync(pair, startedAt)
+            runSync(pair, wallStart, elapsedStart)
         } catch (e: Exception) {
-            val duration = System.currentTimeMillis() - startedAt
+            val duration = SystemClock.elapsedRealtime() - elapsedStart
             diagnosticLogger.e(TAG, "Sync crashed for pair id=${pair.id} name=${pair.name}", e)
             syncLogRepository.log(
                 SyncLogEntity(
@@ -61,29 +64,35 @@ class SyncEngine @Inject constructor(
                     message = e.message ?: "Sync failed",
                 ),
             )
-            folderPairRepository.update(pair.copy(lastSyncAt = startedAt, lastSyncDurationMs = duration, lastSyncStatus = "ERROR"))
+            folderPairRepository.update(
+                pair.copy(
+                    lastSyncAt = System.currentTimeMillis(),
+                    lastSyncDurationMs = duration,
+                    lastSyncStatus = "ERROR",
+                ),
+            )
             SyncOutcome(errors = 1, durationMs = duration)
         }
     }
 
-    private suspend fun runSync(pair: FolderPairEntity, startedAt: Long): SyncOutcome {
+    private suspend fun runSync(pair: FolderPairEntity, wallStart: Long, elapsedStart: Long): SyncOutcome {
         diagnosticLogger.i(
             TAG,
             "Sync start pair='${pair.name}' id=${pair.id} method=${pair.syncMethod} remote='${pair.remoteFolderPath}'",
         )
         syncLogRepository.log(
-            SyncLogEntity(folderPairId = pair.id, timestamp = startedAt, eventType = SyncEventType.SYNC_START),
+            SyncLogEntity(folderPairId = pair.id, timestamp = wallStart, eventType = SyncEventType.SYNC_START),
         )
 
         syncControl.awaitWhilePaused()
-        if (syncControl.shouldStop()) return cancelledSync(pair, startedAt)
+        if (syncControl.shouldStop()) return cancelledSync(pair, elapsedStart)
 
         val account = accountRepository.observeById(pair.accountId).first()
-            ?: return failSync(pair, startedAt, "Account not found")
+            ?: return failSync(pair, elapsedStart, "Account not found")
         val credentials = accountRepository.getCredentials(account.id)
-            ?: return failSync(pair, startedAt, "No stored credentials for account")
+            ?: return failSync(pair, elapsedStart, "No stored credentials for account")
         val authScheme = account.authScheme
-            ?: return failSync(pair, startedAt, "Account has no detected auth scheme yet")
+            ?: return failSync(pair, elapsedStart, "Account has no detected auth scheme yet")
         val trustedCert = accountRepository.getTrustedCertificate(account.id)
         diagnosticLogger.i(
             TAG,
@@ -96,18 +105,25 @@ class SyncEngine @Inject constructor(
             localTreeScanner.scan(localRootUri, pair.excludeHiddenFiles, pair.excludedSubfolders)
         }.getOrElse {
             diagnosticLogger.e(TAG, "Local scan failed for pair='${pair.name}'", it)
-            return failSync(pair, startedAt, "Local folder scan failed: ${it.message}")
+            return failSync(pair, elapsedStart, "Local folder scan failed: ${it.message}")
         }
         diagnosticLogger.i(TAG, "Local scan: ${localEntries.size} entries")
 
-        if (syncControl.shouldStop()) return cancelledSync(pair, startedAt)
+        if (syncControl.shouldStop()) return cancelledSync(pair, elapsedStart)
         syncControl.awaitWhilePaused()
-        if (syncControl.shouldStop()) return cancelledSync(pair, startedAt)
+        if (syncControl.shouldStop()) return cancelledSync(pair, elapsedStart)
+
+        // Create remote root (e.g. /Webdavsync) when the user configured a path that does not
+        // exist yet — first sync should MKCOL then scan, not fail with 404.
+        ensureRemoteFolderTree(client, pair.remoteFolderPath).onFailure {
+            diagnosticLogger.e(TAG, "Could not create remote folder '${pair.remoteFolderPath}'", it)
+            return failSync(pair, elapsedStart, "Remote folder setup failed: ${it.message}")
+        }
 
         val remoteEntries = remoteTreeScanner.scan(client, pair.remoteFolderPath, pair.excludedSubfolders)
             .getOrElse {
                 diagnosticLogger.e(TAG, "Remote scan failed for pair='${pair.name}'", it)
-                return failSync(pair, startedAt, "Remote folder scan failed: ${it.message}")
+                return failSync(pair, elapsedStart, "Remote folder scan failed: ${it.message}")
             }
         diagnosticLogger.i(TAG, "Remote scan: ${remoteEntries.size} entries")
 
@@ -134,9 +150,10 @@ class SyncEngine @Inject constructor(
             cleanEmptyFolders(pair, client, localRootUri)
         }
 
-        val endedAt = System.currentTimeMillis()
-        val finalOutcome = outcome.copy(durationMs = endedAt - startedAt)
-        logOutcome(pair.id, endedAt, finalOutcome)
+        val wallEnd = System.currentTimeMillis()
+        val durationMs = SystemClock.elapsedRealtime() - elapsedStart
+        val finalOutcome = outcome.copy(durationMs = durationMs)
+        logOutcome(pair.id, wallEnd, finalOutcome)
         val status = when {
             finalOutcome.cancelled -> "CANCELLED"
             finalOutcome.hasErrors -> "ERROR"
@@ -147,12 +164,12 @@ class SyncEngine @Inject constructor(
             "Sync end pair='${pair.name}' status=$status uploaded=${finalOutcome.uploaded} " +
                 "downloaded=${finalOutcome.downloaded} deletedLocal=${finalOutcome.deletedLocal} " +
                 "deletedRemote=${finalOutcome.deletedRemote} conflicts=${finalOutcome.conflicts} " +
-                "errors=${finalOutcome.errors} durationMs=${finalOutcome.durationMs}",
+                "errors=${finalOutcome.errors} skipped=${finalOutcome.skipped} durationMs=$durationMs",
         )
         folderPairRepository.update(
             pair.copy(
-                lastSyncAt = endedAt,
-                lastSyncDurationMs = finalOutcome.durationMs,
+                lastSyncAt = wallEnd,
+                lastSyncDurationMs = durationMs,
                 lastSyncStatus = status,
             ),
         )
@@ -175,32 +192,66 @@ class SyncEngine @Inject constructor(
     }
 
     private suspend fun logOutcome(folderPairId: Long, timestamp: Long, outcome: SyncOutcome) {
-        if (outcome.uploaded > 0) {
-            syncLogRepository.log(SyncLogEntity(folderPairId = folderPairId, timestamp = timestamp, eventType = SyncEventType.UPLOAD, fileCount = outcome.uploaded))
-        }
-        if (outcome.downloaded > 0) {
-            syncLogRepository.log(SyncLogEntity(folderPairId = folderPairId, timestamp = timestamp, eventType = SyncEventType.DOWNLOAD, fileCount = outcome.downloaded))
-        }
-        if (outcome.deletedLocal > 0) {
-            syncLogRepository.log(SyncLogEntity(folderPairId = folderPairId, timestamp = timestamp, eventType = SyncEventType.DELETE_DEVICE, fileCount = outcome.deletedLocal))
-        }
-        if (outcome.deletedRemote > 0) {
-            syncLogRepository.log(SyncLogEntity(folderPairId = folderPairId, timestamp = timestamp, eventType = SyncEventType.DELETE_CLOUD, fileCount = outcome.deletedRemote))
-        }
+        // Always write all four counter types (including zeros). Overview prefers the worker
+        // session summary, but per-pair batches must still be complete and unambiguous.
+        syncLogRepository.log(
+            SyncLogEntity(
+                folderPairId = folderPairId,
+                timestamp = timestamp,
+                eventType = SyncEventType.UPLOAD,
+                fileCount = outcome.uploaded,
+            ),
+        )
+        syncLogRepository.log(
+            SyncLogEntity(
+                folderPairId = folderPairId,
+                timestamp = timestamp,
+                eventType = SyncEventType.DOWNLOAD,
+                fileCount = outcome.downloaded,
+            ),
+        )
+        syncLogRepository.log(
+            SyncLogEntity(
+                folderPairId = folderPairId,
+                timestamp = timestamp,
+                eventType = SyncEventType.DELETE_DEVICE,
+                fileCount = outcome.deletedLocal,
+            ),
+        )
+        syncLogRepository.log(
+            SyncLogEntity(
+                folderPairId = folderPairId,
+                timestamp = timestamp,
+                eventType = SyncEventType.DELETE_CLOUD,
+                fileCount = outcome.deletedRemote,
+            ),
+        )
         if (outcome.conflicts > 0) {
-            syncLogRepository.log(SyncLogEntity(folderPairId = folderPairId, timestamp = timestamp, eventType = SyncEventType.CONFLICT, fileCount = outcome.conflicts))
+            syncLogRepository.log(
+                SyncLogEntity(
+                    folderPairId = folderPairId,
+                    timestamp = timestamp,
+                    eventType = SyncEventType.CONFLICT,
+                    fileCount = outcome.conflicts,
+                ),
+            )
         }
         if (outcome.errors > 0) {
-            syncLogRepository.log(SyncLogEntity(folderPairId = folderPairId, timestamp = timestamp, eventType = SyncEventType.ERROR, fileCount = outcome.errors))
+            syncLogRepository.log(
+                SyncLogEntity(
+                    folderPairId = folderPairId,
+                    timestamp = timestamp,
+                    eventType = SyncEventType.ERROR,
+                    fileCount = outcome.errors,
+                ),
+            )
         }
-        val endMessage = if (outcome.cancelled) {
-            "Cancelled after uploaded ${outcome.uploaded}, downloaded ${outcome.downloaded}, " +
-                "deleted (device) ${outcome.deletedLocal}, deleted (cloud) ${outcome.deletedRemote}, " +
-                "conflicts ${outcome.conflicts}, errors ${outcome.errors}"
-        } else {
-            "Uploaded ${outcome.uploaded}, downloaded ${outcome.downloaded}, " +
-                "deleted (device) ${outcome.deletedLocal}, deleted (cloud) ${outcome.deletedRemote}, " +
-                "conflicts ${outcome.conflicts}, errors ${outcome.errors}"
+        val endMessage = buildString {
+            if (outcome.cancelled) append("Cancelled after ")
+            append("uploaded ${outcome.uploaded}, downloaded ${outcome.downloaded}, ")
+            append("deleted (device) ${outcome.deletedLocal}, deleted (cloud) ${outcome.deletedRemote}, ")
+            append("conflicts ${outcome.conflicts}, errors ${outcome.errors}")
+            if (outcome.skipped > 0) append(", skipped ${outcome.skipped}")
         }
         syncLogRepository.log(
             SyncLogEntity(
@@ -213,32 +264,57 @@ class SyncEngine @Inject constructor(
         )
     }
 
-    private suspend fun cancelledSync(pair: FolderPairEntity, startedAt: Long): SyncOutcome {
-        val endedAt = System.currentTimeMillis()
-        val duration = endedAt - startedAt
-        diagnosticLogger.i(TAG, "Sync cancelled for pair='${pair.name}'")
+    /**
+     * Ensures each path segment of [remoteFolderPath] exists on the server (MKCOL as needed).
+     */
+    private suspend fun ensureRemoteFolderTree(
+        client: org.vovchenko.webdavsync.data.remote.WebDavClient,
+        remoteFolderPath: String,
+    ): Result<Unit> {
+        val segments = remoteFolderPath.split('/').filter { it.isNotEmpty() }
+        if (segments.isEmpty()) return Result.success(Unit)
+
+        var built = ""
+        for (segment in segments) {
+            built = if (built.isEmpty()) segment else "$built/$segment"
+            val exists = client.exists(built).getOrDefault(false)
+            if (exists) continue
+            diagnosticLogger.i(TAG, "Creating remote folder: $built")
+            client.createDirectory(built).onFailure { err ->
+                val stillMissing = !client.exists(built).getOrDefault(false)
+                if (stillMissing) return Result.failure(err)
+            }
+        }
+        return Result.success(Unit)
+    }
+
+    private suspend fun cancelledSync(pair: FolderPairEntity, elapsedStart: Long): SyncOutcome {
+        val wallEnd = System.currentTimeMillis()
+        val duration = SystemClock.elapsedRealtime() - elapsedStart
+        diagnosticLogger.i(TAG, "Sync cancelled for pair='${pair.name}' durationMs=$duration")
         syncLogRepository.log(
             SyncLogEntity(
                 folderPairId = pair.id,
-                timestamp = endedAt,
+                timestamp = wallEnd,
                 eventType = SyncEventType.SYNC_END,
                 message = "Cancelled by user",
             ),
         )
         folderPairRepository.update(
-            pair.copy(lastSyncAt = endedAt, lastSyncDurationMs = duration, lastSyncStatus = "CANCELLED"),
+            pair.copy(lastSyncAt = wallEnd, lastSyncDurationMs = duration, lastSyncStatus = "CANCELLED"),
         )
         return SyncOutcome(durationMs = duration, cancelled = true)
     }
 
-    private suspend fun failSync(pair: FolderPairEntity, startedAt: Long, message: String): SyncOutcome {
-        val endedAt = System.currentTimeMillis()
-        diagnosticLogger.e(TAG, "Sync failed for pair='${pair.name}': $message")
-        syncLogRepository.log(SyncLogEntity(folderPairId = pair.id, timestamp = endedAt, eventType = SyncEventType.ERROR, message = message))
+    private suspend fun failSync(pair: FolderPairEntity, elapsedStart: Long, message: String): SyncOutcome {
+        val wallEnd = System.currentTimeMillis()
+        val duration = SystemClock.elapsedRealtime() - elapsedStart
+        diagnosticLogger.e(TAG, "Sync failed for pair='${pair.name}': $message durationMs=$duration")
+        syncLogRepository.log(SyncLogEntity(folderPairId = pair.id, timestamp = wallEnd, eventType = SyncEventType.ERROR, message = message))
         folderPairRepository.update(
-            pair.copy(lastSyncAt = endedAt, lastSyncDurationMs = endedAt - startedAt, lastSyncStatus = "ERROR"),
+            pair.copy(lastSyncAt = wallEnd, lastSyncDurationMs = duration, lastSyncStatus = "ERROR"),
         )
-        return SyncOutcome(errors = 1, durationMs = endedAt - startedAt)
+        return SyncOutcome(errors = 1, durationMs = duration)
     }
 
     private companion object {

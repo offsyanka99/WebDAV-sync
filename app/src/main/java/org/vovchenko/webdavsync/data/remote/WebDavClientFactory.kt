@@ -1,5 +1,6 @@
 package org.vovchenko.webdavsync.data.remote
 
+import android.content.Context
 import okhttp3.OkHttpClient
 import org.vovchenko.webdavsync.data.local.security.WebDavCredentials
 import org.vovchenko.webdavsync.data.model.AuthScheme
@@ -7,11 +8,14 @@ import org.vovchenko.webdavsync.data.remote.auth.BasicAuthStrategy
 import org.vovchenko.webdavsync.data.remote.auth.DigestAuthStrategy
 import org.vovchenko.webdavsync.data.remote.auth.WebDavAuthStrategy
 import org.vovchenko.webdavsync.data.remote.trust.TrustedCertTrustManagerFactory
+import java.io.File
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 
 /** Builds a per-account [WebDavClient] with the account's auth scheme and trusted certificate wired in. */
-class WebDavClientFactory @Inject constructor() {
+class WebDavClientFactory @Inject constructor(
+    private val context: Context,
+) {
 
     fun create(
         baseUrl: String,
@@ -20,7 +24,8 @@ class WebDavClientFactory @Inject constructor() {
         trustedCertificateBytes: ByteArray?,
     ): WebDavClient {
         val okHttpClient = buildOkHttpClient(authScheme, credentials, trustedCertificateBytes)
-        return SardineWebDavClient(okHttpClient, baseUrl)
+        val uploadCache = File(context.cacheDir, "webdav-uploads")
+        return SardineWebDavClient(okHttpClient, baseUrl, uploadCache)
     }
 
     /** Builds a bare client (no auth applied yet) for the auth-scheme detection probe. */

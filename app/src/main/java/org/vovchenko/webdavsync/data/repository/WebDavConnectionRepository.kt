@@ -81,13 +81,22 @@ class WebDavConnectionRepository @Inject constructor(
             return Result.failure(it)
         }
 
+        // Keep previous values if the server omits RFC 4331 quota properties (common on some
+        // dav.php / limited WebDAV stacks) so the UI does not flip to "—" after a successful sync.
+        val available = quota.availableBytes ?: account.storageAvailableBytes
+        val total = quota.totalBytes ?: account.storageQuotaBytes
         accountRepository.updateAccount(
             account.copy(
-                storageQuotaBytes = quota.totalBytes,
-                storageAvailableBytes = quota.availableBytes,
+                storageQuotaBytes = total,
+                storageAvailableBytes = available,
             ),
         )
-        diagnosticLogger.i(TAG, "Quota refreshed accountId=${account.id} available=${quota.availableBytes}")
+        diagnosticLogger.i(
+            TAG,
+            "Quota refreshed accountId=${account.id} available=${quota.availableBytes} " +
+                "used=${quota.usedBytes} total=${quota.totalBytes} " +
+                "(stored available=$available total=$total)",
+        )
         return Result.success(Unit)
     }
 
