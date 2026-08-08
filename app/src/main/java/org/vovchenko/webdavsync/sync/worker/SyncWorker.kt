@@ -37,8 +37,19 @@ class SyncWorker @AssistedInject constructor(
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
-        syncControl.beginSession()
         val targetId = inputData.getLong(KEY_FOLDER_PAIR_ID, -1L).takeIf { it >= 0 }
+        // Manual + periodic unique works can be scheduled independently; only one may transfer.
+        // Two concurrent downloads of the same path make SAF createFile auto-rename to
+        // "file (1).jpg", which the next two-way pass then uploads as a new remote file.
+        if (!syncControl.tryBeginSession()) {
+            syncControl.requestFollowUpSync()
+            diagnosticLogger.i(
+                TAG,
+                "Worker skipped (session already active) targetPairId=${targetId ?: "all"} — follow-up requested",
+            )
+            return Result.success()
+        }
+
         diagnosticLogger.i(TAG, "Worker start targetPairId=${targetId ?: "all"} runAttempt=$runAttemptCount")
         setForeground(
             notificationHelper.foregroundInfo(applicationContext.getString(R.string.sync_notification_starting)),
@@ -50,11 +61,15 @@ class SyncWorker @AssistedInject constructor(
         } finally {
             diagnosticLogger.i(TAG, "Worker finished cancelled=${syncControl.isCancelled} stopped=$isStopped")
             val followUp = syncControl.endSession()
-            // Refresh status + recent-change counters after the pass.
-            SyncWidgetProvider.requestUpdate(applicationContext)
             // Coalesce mid-pass local changes into one follow-up instead of REPLACE mid-download.
+            // Paint "Syncing…" when a chained pass will start; otherwise a late requestUpdate from
+            // this worker races the next worker and the widget snaps back to OK while Overview is
+            // still "Sync in process...".
             if (followUp && !isStopped) {
                 syncScheduler.enqueueFollowUpIfNeeded(requested = true)
+                SyncWidgetProvider.showSyncing(applicationContext)
+            } else {
+                SyncWidgetProvider.requestUpdate(applicationContext)
             }
         }
     }

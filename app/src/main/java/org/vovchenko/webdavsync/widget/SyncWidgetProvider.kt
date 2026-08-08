@@ -5,6 +5,8 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -13,6 +15,7 @@ import kotlinx.coroutines.launch
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
 import org.vovchenko.webdavsync.data.repository.SyncLogRepository
 import org.vovchenko.webdavsync.domain.sync.RecentChangesCalculator
+import org.vovchenko.webdavsync.sync.worker.SyncWorker
 
 /**
  * 4×2 home-screen widget: last sync status, recent change counts, and a Sync button.
@@ -82,12 +85,28 @@ class SyncWidgetProvider : AppWidgetProvider() {
 
         private suspend fun loadState(context: Context): SyncWidgetState {
             val entry = entryPoint(context)
-            return loadState(entry.folderPairRepository(), entry.syncLogRepository())
+            val syncing = isSyncWorkerRunning(context)
+            return loadState(entry.folderPairRepository(), entry.syncLogRepository(), syncing = syncing)
+        }
+
+        /**
+         * Aligns with Overview: only RUNNING workers count as syncing, so a finished pass that left
+         * an ENQUEUED follow-up waiting on Wi‑Fi does not leave the widget/Overview disagreeing.
+         */
+        private fun isSyncWorkerRunning(context: Context): Boolean {
+            val wm = WorkManager.getInstance(context.applicationContext)
+            fun anyRunning(uniqueName: String): Boolean =
+                runCatching { wm.getWorkInfosForUniqueWork(uniqueName).get() }
+                    .getOrDefault(emptyList())
+                    .any { it.state == WorkInfo.State.RUNNING }
+            return anyRunning(SyncWorker.UNIQUE_MANUAL_WORK_NAME) ||
+                anyRunning(SyncWorker.UNIQUE_PERIODIC_WORK_NAME)
         }
 
         suspend fun loadState(
             folderPairRepository: FolderPairRepository,
             syncLogRepository: SyncLogRepository,
+            syncing: Boolean = false,
         ): SyncWidgetState {
             val folderPairs = folderPairRepository.observeAll().first()
             val logs = syncLogRepository.observeRecent(100).first()
@@ -101,6 +120,7 @@ class SyncWidgetProvider : AppWidgetProvider() {
                 downloaded = recent.downloaded,
                 deletedDevice = recent.deletedDevice,
                 deletedCloud = recent.deletedCloud,
+                syncing = syncing,
             )
         }
 

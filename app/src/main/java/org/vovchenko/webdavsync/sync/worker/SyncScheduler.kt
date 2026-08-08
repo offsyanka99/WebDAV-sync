@@ -57,9 +57,12 @@ class SyncScheduler @Inject constructor(
      * Never [ExistingWorkPolicy.REPLACE]s a running/queued pass: that cancelled mid-download
      * transfers, left partial files, and the replacement pass treated them as local-only uploads
      * (duplicates / conflicted copies). While busy we record a follow-up instead.
+     *
+     * Also coalesces when the **periodic** worker is running — those are separate unique works and
+     * would otherwise start a second concurrent pass.
      */
     suspend fun enqueueImmediateSync(folderPairId: Long? = null) {
-        if (syncControl.isSessionActive || hasActiveManualWork()) {
+        if (syncControl.isSessionActive || hasActiveManualWork() || hasRunningPeriodicWork()) {
             syncControl.requestFollowUpSync()
             diagnosticLogger.i(
                 TAG,
@@ -114,21 +117,27 @@ class SyncScheduler @Inject constructor(
         }
     }
 
+    private fun hasRunningPeriodicWork(): Boolean {
+        val infos = runCatching {
+            workManager.getWorkInfosForUniqueWork(SyncWorker.UNIQUE_PERIODIC_WORK_NAME).get()
+        }.getOrDefault(emptyList())
+        return infos.any { it.state == WorkInfo.State.RUNNING }
+    }
+
     /**
-     * True while a sync worker is running, or a manual sync is queued/blocked on constraints.
-     * Periodic work sitting ENQUEUED until the next interval is ignored (that is idle waiting).
+     * True only while a sync worker is **RUNNING**.
+     *
+     * Manual work left ENQUEUED/BLOCKED on unmet constraints (Wi‑Fi only, charging) must not keep
+     * Overview stuck on "Sync in process..." after a finished pass already wrote Last sync / Duration
+     * and the widget shows OK. Queued follow-ups still start when constraints are met.
      */
     fun observeIsSyncActive(): Flow<Boolean> = combine(
         workManager.getWorkInfosForUniqueWorkFlow(SyncWorker.UNIQUE_MANUAL_WORK_NAME),
         workManager.getWorkInfosForUniqueWorkFlow(SyncWorker.UNIQUE_PERIODIC_WORK_NAME),
     ) { manual, periodic ->
-        manual.any { it.state.isActiveForManual } || periodic.any { it.state == WorkInfo.State.RUNNING }
+        manual.any { it.state == WorkInfo.State.RUNNING } ||
+            periodic.any { it.state == WorkInfo.State.RUNNING }
     }
-
-    private val WorkInfo.State.isActiveForManual: Boolean
-        get() = this == WorkInfo.State.ENQUEUED ||
-            this == WorkInfo.State.RUNNING ||
-            this == WorkInfo.State.BLOCKED
 
     private fun buildConstraints(settings: AppSettings): Constraints = Constraints.Builder()
         .setRequiredNetworkType(if (settings.wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED)

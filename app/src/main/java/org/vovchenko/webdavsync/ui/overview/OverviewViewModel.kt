@@ -34,10 +34,10 @@ data class OverviewUiState(
     val deletedDevice: Int = 0,
     val deletedCloud: Int = 0,
     val accounts: List<WebDavAccountEntity> = emptyList(),
-    /** True while WorkManager has an in-flight (or queued manual) sync. */
+    /** True while a sync worker is RUNNING (not merely ENQUEUED waiting on constraints). */
     val syncing: Boolean = false,
 ) {
-    /** Value shown in the Status row — live "in process" while a worker is active. */
+    /** Value shown in the Status row — live "in process" only while transfers are active. */
     val statusDisplay: String
         get() = if (syncing) "Sync in process..." else (lastSyncStatus ?: "Ready")
 }

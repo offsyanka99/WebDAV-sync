@@ -56,6 +56,30 @@ class SyncControlTest {
     }
 
     @Test
+    fun `tryBeginSession is single-flight across concurrent workers`() {
+        val control = SyncControl()
+        assertTrue(control.tryBeginSession())
+        assertTrue(control.isSessionActive)
+        // Second worker (e.g. periodic while manual is running) must not claim the session.
+        assertFalse(control.tryBeginSession())
+        assertTrue(control.isSessionActive)
+        assertFalse(control.endSession())
+        assertFalse(control.isSessionActive)
+        // After release, another worker can start.
+        assertTrue(control.tryBeginSession())
+        assertFalse(control.endSession())
+    }
+
+    @Test
+    fun `tryBeginSession preserves follow-up requested before session start`() {
+        val control = SyncControl()
+        control.requestFollowUpSync()
+        assertTrue(control.tryBeginSession())
+        // Flag set before begin must still be returned by endSession.
+        assertTrue(control.endSession())
+    }
+
+    @Test
     fun `awaitWhilePaused returns after resume`() = runBlocking {
         val control = SyncControl()
         control.pause()

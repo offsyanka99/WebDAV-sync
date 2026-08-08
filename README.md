@@ -2,7 +2,7 @@
 
 Android app that keeps local folders and WebDAV remote folders in sync — manually, on a schedule, or when files change.
 
-**Current release:** [v1.0.16](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.0.16)  
+**Current release:** [v1.0.17](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.0.17)  
 **Min Android:** 8.0 (API 26)  
 **License:** [MIT](LICENSE)
 
@@ -104,6 +104,14 @@ Core flow: scan local + remote → diff against last-sync baseline → transfer/
 - **Issues:** [GitHub Issues](https://github.com/offsyanka99/WebDAV-sync/issues)
 
 ## Changelog (recent)
+
+### v1.0.17
+
+- **True single-flight sync across manual + periodic workers** — WorkManager can start both unique works at once; only one may own a session (`tryBeginSession`). Concurrent downloads of the same path no longer race SAF `createFile` into `name (1).ext` ghosts that the next pass then uploads.
+- **SAF create rejects auto-renames** — if the provider renames a create to `file (1).jpg` or `Photos (1)`, the ghost is deleted and the canonical name is re-resolved so content is never written under an untracked path.
+- **Overview Status no longer sticks on “Sync in process…”** after a finished pass — only a **RUNNING** worker counts as syncing (ENQUEUED waiting on Wi‑Fi/charging no longer masks Last sync / Duration as still in progress).
+- **Widget stays aligned with Overview** during chained follow-ups (keeps “Syncing…” when a follow-up is enqueued; reloads also check WorkManager RUNNING).
+- Large multi-file re-syncs are much faster when the trees already match (no concurrent double-pass / phantom uploads).
 
 ### v1.0.16
 

@@ -9,6 +9,10 @@ import javax.inject.Singleton
  * Cooperative pause/cancel state for an in-flight sync (plan Phase 11 notification actions),
  * plus single-flight session tracking so instant-upload / folder-watch cannot REPLACE a running
  * worker mid-transfer (that cancelled large downloads and re-ran as uploads → duplicates).
+ *
+ * Manual and periodic WorkManager unique works are independent and can start in parallel; only
+ * one may own a session ([tryBeginSession]) so two passes never download the same remote file
+ * into SAF at once (which creates `name (1).ext` ghosts that the next pass uploads).
  */
 @Singleton
 class SyncControl @Inject constructor() {
@@ -33,11 +37,21 @@ class SyncControl @Inject constructor() {
     }
 
     /**
-     * Marks a worker pass as active and clears pause/cancel for the new run.
-     * Call at the start of [org.vovchenko.webdavsync.sync.worker.SyncWorker.doWork].
+     * Atomically claims the sync session if idle. Returns false when another worker already owns
+     * the pass — the caller must [requestFollowUpSync] and exit without transferring files.
      *
      * Does not clear [requestFollowUpSync] — requests made while work was only ENQUEUED
      * (before this session started) must still run after [endSession].
+     */
+    fun tryBeginSession(): Boolean {
+        if (!sessionActive.compareAndSet(false, true)) return false
+        reset()
+        return true
+    }
+
+    /**
+     * Marks a worker pass as active and clears pause/cancel (unconditional). Prefer
+     * [tryBeginSession] in production workers so concurrent manual/periodic work cannot both run.
      */
     fun beginSession() {
         reset()
