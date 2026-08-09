@@ -16,6 +16,7 @@ import org.vovchenko.webdavsync.data.repository.WebDavConnectionRepository
 import org.vovchenko.webdavsync.domain.sync.SyncEngine
 import org.vovchenko.webdavsync.sync.FolderChangeCoordinator
 import org.vovchenko.webdavsync.sync.control.SyncControl
+import org.vovchenko.webdavsync.sync.control.SyncProgress
 import org.vovchenko.webdavsync.sync.service.SyncNotificationHelper
 import org.vovchenko.webdavsync.widget.SyncWidgetProvider
 
@@ -31,6 +32,7 @@ class SyncWorker @AssistedInject constructor(
     private val syncLogRepository: SyncLogRepository,
     private val notificationHelper: SyncNotificationHelper,
     private val syncControl: SyncControl,
+    private val syncProgress: SyncProgress,
     private val diagnosticLogger: DiagnosticLogger,
     private val folderChangeCoordinator: FolderChangeCoordinator,
     private val syncScheduler: SyncScheduler,
@@ -50,6 +52,7 @@ class SyncWorker @AssistedInject constructor(
             return Result.success()
         }
 
+        syncProgress.beginPass()
         diagnosticLogger.i(TAG, "Worker start targetPairId=${targetId ?: "all"} runAttempt=$runAttemptCount")
         setForeground(
             notificationHelper.foregroundInfo(applicationContext.getString(R.string.sync_notification_starting)),
@@ -62,6 +65,7 @@ class SyncWorker @AssistedInject constructor(
         } finally {
             diagnosticLogger.i(TAG, "Worker finished cancelled=${syncControl.isCancelled} stopped=$isStopped")
             val followUp = syncControl.endSession()
+            syncProgress.endPass()
             // Coalesce mid-pass local changes into one follow-up instead of REPLACE mid-download.
             if (followUp && !isStopped) {
                 syncScheduler.enqueueFollowUpIfNeeded(requested = true)

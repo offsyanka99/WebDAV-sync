@@ -87,7 +87,9 @@ fun OverviewScreen(
                 }
             }
             item {
-                SectionCard(title = "Recent changes") {
+                SectionCard(
+                    title = if (uiState.liveProgress) "Recent changes (live)" else "Recent changes",
+                ) {
                     LabeledRow(label = "Upload", value = uiState.uploaded.toString())
                     LabeledRow(label = "Download", value = uiState.downloaded.toString())
                     LabeledRow(label = "Deleted in device", value = uiState.deletedDevice.toString())

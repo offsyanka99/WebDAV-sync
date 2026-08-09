@@ -2,7 +2,7 @@
 
 Android app that keeps local folders and WebDAV remote folders in sync — manually, on a schedule, or when files change.
 
-**Current release:** [v1.1.1](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.1.1)  
+**Current release:** [v1.1.2](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.1.2)  
 **Min Android:** 8.0 (API 26)  
 **License:** [MIT](LICENSE)
 
@@ -17,6 +17,7 @@ Android app that keeps local folders and WebDAV remote folders in sync — manua
 - **Background sync** via WorkManager (periodic + manual + boot reschedule)
 - **Instant upload** when local changes are detected (optional per pair), coalesced so it never interrupts an in-flight pass
 - **Foreground notification** with pause / resume / cancel during sync
+- **Live Recent changes on Overview** while a pass is running (upload / download / delete counts, no DB write per file)
 - **Size limits** for upload and download
 - **Wi‑Fi only**, mobile-data warning, parallel transfers, retries
 - **Quota display** (RFC 4331) on Overview when the server supports it
@@ -104,6 +105,11 @@ Core flow: scan local + remote → diff against last-sync baseline → transfer/
 - **Issues:** [GitHub Issues](https://github.com/offsyanka99/WebDAV-sync/issues)
 
 ## Changelog (recent)
+
+### v1.1.2
+
+- **Live Recent changes on Overview** — while a sync is running, Upload / Download / Deleted in device / Deleted in cloud update in real time from in-memory counters (`SyncProgress`). Section title shows **Recent changes (live)**; when the pass ends, counters return to the last finished session summary from Room.
+- **No per-file database writes** for progress — only atomics + `StateFlow` (same file counts as the session summary; conflicts that upload/download count as up/down).
 
 ### v1.1.1
 

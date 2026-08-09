@@ -22,6 +22,7 @@ import org.vovchenko.webdavsync.domain.sync.SyncOverviewMetrics
 import org.vovchenko.webdavsync.domain.sync.SyncStatusDisplay
 import org.vovchenko.webdavsync.sync.control.ManualSyncDecision
 import org.vovchenko.webdavsync.sync.control.ManualSyncStarter
+import org.vovchenko.webdavsync.sync.control.SyncProgress
 import org.vovchenko.webdavsync.sync.worker.SyncScheduler
 import javax.inject.Inject
 
@@ -37,24 +38,36 @@ data class OverviewUiState(
     val accounts: List<WebDavAccountEntity> = emptyList(),
     /** True while a sync worker is RUNNING (not merely ENQUEUED waiting on constraints). */
     val syncing: Boolean = false,
+    /**
+     * True when Recent changes numbers are live for this pass (in-memory counters),
+     * not the last finished session summary from Room.
+     */
+    val liveProgress: Boolean = false,
 ) {
     /** Same labels as the home-screen widget ([SyncStatusDisplay]). */
     val statusDisplay: String
         get() = SyncStatusDisplay.resolve(lastSyncStatus, syncing).text
 
     companion object {
-        fun from(metrics: SyncOverviewMetrics, accounts: List<WebDavAccountEntity>): OverviewUiState =
-            OverviewUiState(
+        fun from(
+            metrics: SyncOverviewMetrics,
+            accounts: List<WebDavAccountEntity>,
+            live: SyncProgress.Counts? = null,
+        ): OverviewUiState {
+            val liveActive = live?.takeIf { it.active }
+            return OverviewUiState(
                 lastSyncAtMillis = metrics.lastSyncAtMillis,
                 lastSyncDurationMs = metrics.lastSyncDurationMs,
                 lastSyncStatus = metrics.lastSyncStatus,
-                uploaded = metrics.uploaded,
-                downloaded = metrics.downloaded,
-                deletedDevice = metrics.deletedDevice,
-                deletedCloud = metrics.deletedCloud,
+                uploaded = liveActive?.uploaded ?: metrics.uploaded,
+                downloaded = liveActive?.downloaded ?: metrics.downloaded,
+                deletedDevice = liveActive?.deletedDevice ?: metrics.deletedDevice,
+                deletedCloud = liveActive?.deletedCloud ?: metrics.deletedCloud,
                 accounts = accounts,
                 syncing = metrics.syncing,
+                liveProgress = liveActive != null,
             )
+        }
     }
 }
 
@@ -66,6 +79,7 @@ class OverviewViewModel @Inject constructor(
     private val accountRepository: WebDavAccountRepository,
     private val settingsRepository: SettingsRepository,
     private val syncScheduler: SyncScheduler,
+    private val syncProgress: SyncProgress,
 ) : ViewModel() {
 
     private val _showMobileDataWarning = MutableStateFlow(false)
@@ -76,10 +90,12 @@ class OverviewViewModel @Inject constructor(
         syncLogRepository.observeRecent(100),
         accountRepository.observeAll(),
         syncScheduler.observeIsSyncActive(),
-    ) { folderPairs, logs, accounts, syncing ->
+        syncProgress.counts,
+    ) { folderPairs, logs, accounts, syncing, live ->
         OverviewUiState.from(
-            SyncOverviewMetrics.from(folderPairs, logs, syncing = syncing),
-            accounts,
+            metrics = SyncOverviewMetrics.from(folderPairs, logs, syncing = syncing),
+            accounts = accounts,
+            live = live,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), OverviewUiState())
 

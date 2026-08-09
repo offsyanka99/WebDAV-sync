@@ -20,6 +20,7 @@ import org.vovchenko.webdavsync.data.repository.SyncFileStateRepository
 import org.vovchenko.webdavsync.domain.model.SyncAction
 import org.vovchenko.webdavsync.domain.model.SyncOutcome
 import org.vovchenko.webdavsync.sync.control.SyncControl
+import org.vovchenko.webdavsync.sync.control.SyncProgress
 import java.io.InputStream
 import javax.inject.Inject
 
@@ -56,6 +57,7 @@ class TransferExecutor @Inject constructor(
     private val conflictResolver: ConflictResolver,
     private val syncFileStateRepository: SyncFileStateRepository,
     private val syncControl: SyncControl,
+    private val syncProgress: SyncProgress,
     private val diagnosticLogger: DiagnosticLogger,
 ) {
     suspend fun executeAll(actions: List<SyncAction>, ctx: TransferContext): SyncOutcome {
@@ -104,7 +106,12 @@ class TransferExecutor @Inject constructor(
         val results = coroutineScope {
             fileActions.map { action ->
                 async(Dispatchers.IO) {
-                    semaphore.withPermit { executeFileActionWithRetry(action, ctx) }
+                    semaphore.withPermit {
+                        val result = executeFileActionWithRetry(action, ctx)
+                        // Live Overview counters (throttled in SyncProgress) — no Room write.
+                        recordLiveProgress(result)
+                        result
+                    }
                 }
             }.awaitAll()
         }
@@ -424,6 +431,23 @@ class TransferExecutor @Inject constructor(
         if (syncControl.shouldStop()) return true
         syncControl.awaitWhilePaused()
         return syncControl.shouldStop()
+    }
+
+    private fun recordLiveProgress(result: ActionResult) {
+        when (result) {
+            ActionResult.Uploaded -> syncProgress.recordUploaded()
+            ActionResult.Downloaded -> syncProgress.recordDownloaded()
+            ActionResult.DeletedLocal -> syncProgress.recordDeletedDevice()
+            ActionResult.DeletedRemote -> syncProgress.recordDeletedCloud()
+            is ActionResult.ConflictResolved -> {
+                if (result.winningSide == SyncAction.Side.LOCAL) {
+                    syncProgress.recordUploaded()
+                } else {
+                    syncProgress.recordDownloaded()
+                }
+            }
+            ActionResult.Skipped, ActionResult.Failed -> Unit
+        }
     }
 
     /**
