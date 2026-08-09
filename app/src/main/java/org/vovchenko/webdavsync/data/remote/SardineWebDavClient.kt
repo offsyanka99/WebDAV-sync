@@ -2,11 +2,13 @@ package org.vovchenko.webdavsync.data.remote
 
 import com.thegrizzlylabs.sardineandroid.impl.OkHttpSardine
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
 import java.io.File
@@ -80,36 +82,45 @@ class SardineWebDavClient(
         }
     }
 
-    override suspend fun upload(remotePath: String, contentType: String, content: InputStream): Result<Unit> =
+    override suspend fun upload(
+        remotePath: String,
+        contentType: String,
+        contentLength: Long,
+        openContent: () -> InputStream,
+    ): Result<Unit> =
         runCatchingWebDav {
-            // P0: never wrap a one-shot SAF InputStream directly in RequestBody.
-            // OkHttp may call writeTo() more than once (Digest 401 challenge/retry, internal
-            // retries). The first pass drained the stream; the second sent 0 bytes → empty files
-            // on the server, then two-way sync could download that empty file back and wipe local.
-            // Copy to a cache file once so the body is re-readable and has a known Content-Length.
-            if (!uploadCacheDir.exists()) uploadCacheDir.mkdirs()
-            val temp = File.createTempFile("webdav-upload-", ".bin", uploadCacheDir)
-            try {
-                content.use { input ->
-                    temp.outputStream().buffered().use { output -> input.copyTo(output) }
-                }
-                val length = temp.length()
-                if (length == 0L) {
-                    throw java.io.IOException("Refusing to upload empty body for $remotePath (source produced 0 bytes)")
-                }
-                val body = temp.asRequestBody(contentType.toMediaTypeOrNull())
-                val request = Request.Builder()
-                    .url(resolve(remotePath, asCollection = false))
-                    .put(body)
-                    .header("Content-Length", length.toString())
-                    .build()
-                okHttpClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        throw java.io.IOException("PUT failed: HTTP ${response.code} for $remotePath (${length} bytes)")
+            if (contentLength <= 0L) {
+                throw java.io.IOException("Refusing to upload empty body for $remotePath")
+            }
+            // Stream from the source (SAF) with known Content-Length. [openContent] is called on
+            // every writeTo() so Digest 401 retries re-read from the start without copying the
+            // whole file into cache (parallel multi‑100MB staging was OOMing / hanging sync).
+            val mediaType = contentType.toMediaTypeOrNull()
+            val body = object : RequestBody() {
+                override fun contentType(): MediaType? = mediaType
+                override fun contentLength(): Long = contentLength
+                override fun writeTo(sink: BufferedSink) {
+                    openContent().use { input ->
+                        val buffer = ByteArray(UPLOAD_COPY_BUFFER)
+                        while (true) {
+                            val n = input.read(buffer)
+                            if (n < 0) break
+                            sink.write(buffer, 0, n)
+                        }
                     }
                 }
-            } finally {
-                temp.delete()
+            }
+            val url = resolve(remotePath, asCollection = false)
+            val request = Request.Builder()
+                .url(url)
+                .put(body)
+                .build()
+            okHttpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw java.io.IOException(
+                        "PUT failed: HTTP ${response.code} for $remotePath ($contentLength bytes)",
+                    )
+                }
             }
         }
 
@@ -189,6 +200,7 @@ class SardineWebDavClient(
     }
 
     private companion object {
+        const val UPLOAD_COPY_BUFFER = 64 * 1024
         const val QUOTA_PROPFIND_BODY = """<?xml version="1.0" encoding="utf-8" ?>
 <D:propfind xmlns:D="DAV:">
   <D:prop>

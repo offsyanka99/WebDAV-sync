@@ -13,7 +13,17 @@ interface WebDavClient {
 
     suspend fun list(remotePath: String): Result<List<WebDavResource>>
 
-    suspend fun upload(remotePath: String, contentType: String, content: InputStream): Result<Unit>
+    /**
+     * Uploads a file. [openContent] is invoked for each body write (OkHttp/Digest may call
+     * `writeTo` more than once) — each call must return a **fresh** stream from the start.
+     * [contentLength] is required so PUT can set Content-Length without staging the whole file.
+     */
+    suspend fun upload(
+        remotePath: String,
+        contentType: String,
+        contentLength: Long,
+        openContent: () -> InputStream,
+    ): Result<Unit>
 
     suspend fun download(remotePath: String): Result<InputStream>
 

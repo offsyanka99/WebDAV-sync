@@ -18,10 +18,11 @@ import org.vovchenko.webdavsync.data.repository.FolderPairRepository
 import org.vovchenko.webdavsync.data.repository.SettingsRepository
 import org.vovchenko.webdavsync.data.repository.SyncLogRepository
 import org.vovchenko.webdavsync.data.repository.WebDavAccountRepository
-import org.vovchenko.webdavsync.domain.sync.RecentChangesCalculator
+import org.vovchenko.webdavsync.domain.sync.SyncOverviewMetrics
 import org.vovchenko.webdavsync.domain.sync.SyncStatusDisplay
+import org.vovchenko.webdavsync.sync.control.ManualSyncDecision
+import org.vovchenko.webdavsync.sync.control.ManualSyncStarter
 import org.vovchenko.webdavsync.sync.worker.SyncScheduler
-import org.vovchenko.webdavsync.util.NetworkStatus
 import javax.inject.Inject
 
 data class OverviewUiState(
@@ -40,6 +41,21 @@ data class OverviewUiState(
     /** Same labels as the home-screen widget ([SyncStatusDisplay]). */
     val statusDisplay: String
         get() = SyncStatusDisplay.resolve(lastSyncStatus, syncing).text
+
+    companion object {
+        fun from(metrics: SyncOverviewMetrics, accounts: List<WebDavAccountEntity>): OverviewUiState =
+            OverviewUiState(
+                lastSyncAtMillis = metrics.lastSyncAtMillis,
+                lastSyncDurationMs = metrics.lastSyncDurationMs,
+                lastSyncStatus = metrics.lastSyncStatus,
+                uploaded = metrics.uploaded,
+                downloaded = metrics.downloaded,
+                deletedDevice = metrics.deletedDevice,
+                deletedCloud = metrics.deletedCloud,
+                accounts = accounts,
+                syncing = metrics.syncing,
+            )
+    }
 }
 
 @HiltViewModel
@@ -61,19 +77,9 @@ class OverviewViewModel @Inject constructor(
         accountRepository.observeAll(),
         syncScheduler.observeIsSyncActive(),
     ) { folderPairs, logs, accounts, syncing ->
-        val mostRecentPair = folderPairs.filter { it.lastSyncAt != null }.maxByOrNull { it.lastSyncAt!! }
-        val recent = RecentChangesCalculator.fromLogs(logs)
-
-        OverviewUiState(
-            lastSyncAtMillis = mostRecentPair?.lastSyncAt,
-            lastSyncDurationMs = mostRecentPair?.lastSyncDurationMs,
-            lastSyncStatus = mostRecentPair?.lastSyncStatus,
-            uploaded = recent.uploaded,
-            downloaded = recent.downloaded,
-            deletedDevice = recent.deletedDevice,
-            deletedCloud = recent.deletedCloud,
-            accounts = accounts,
-            syncing = syncing,
+        OverviewUiState.from(
+            SyncOverviewMetrics.from(folderPairs, logs, syncing = syncing),
+            accounts,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), OverviewUiState())
 
@@ -84,10 +90,12 @@ class OverviewViewModel @Inject constructor(
         // without needing a warning.
         viewModelScope.launch {
             val settings = settingsRepository.settings.first()
-            val onCellular = NetworkStatus.isOnCellularData(context)
-            if (settings.warnOnMobileNetwork && onCellular) {
-                _showMobileDataWarning.value = true
-                return@launch
+            when (ManualSyncStarter.prepareManualSync(context, settings)) {
+                ManualSyncDecision.NeedsMobileDataConfirm -> {
+                    _showMobileDataWarning.value = true
+                    return@launch
+                }
+                ManualSyncDecision.Proceed -> Unit
             }
             if (uiState.value.syncing) return@launch
             syncScheduler.enqueueImmediateSync()

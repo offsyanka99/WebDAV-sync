@@ -59,35 +59,18 @@ class SyncEngine @Inject constructor(
         } catch (e: CancellationException) {
             // Propagate so WorkManager can stop the worker; still record CANCELLED so Overview
             // does not keep showing "Sync in process..." / a stale OK after a superseded pass.
-            val duration = SystemClock.elapsedRealtime() - elapsedStart
+            val duration = runCatching {
+                finishPair(pair, elapsedStart, status = "CANCELLED")
+            }.getOrElse { SystemClock.elapsedRealtime() - elapsedStart }
             diagnosticLogger.i(TAG, "Sync cancelled (coroutine) for pair='${pair.name}' durationMs=$duration")
-            runCatching {
-                folderPairRepository.update(
-                    pair.copy(
-                        lastSyncAt = System.currentTimeMillis(),
-                        lastSyncDurationMs = duration,
-                        lastSyncStatus = "CANCELLED",
-                    ),
-                )
-            }
             throw e
         } catch (e: Exception) {
-            val duration = SystemClock.elapsedRealtime() - elapsedStart
             diagnosticLogger.e(TAG, "Sync crashed for pair id=${pair.id} name=${pair.name}", e)
-            syncLogRepository.log(
-                SyncLogEntity(
-                    folderPairId = pair.id,
-                    timestamp = System.currentTimeMillis(),
-                    eventType = SyncEventType.ERROR,
-                    message = e.message ?: "Sync failed",
-                ),
-            )
-            folderPairRepository.update(
-                pair.copy(
-                    lastSyncAt = System.currentTimeMillis(),
-                    lastSyncDurationMs = duration,
-                    lastSyncStatus = "ERROR",
-                ),
+            val duration = finishPair(
+                pair,
+                elapsedStart,
+                status = "ERROR",
+                errorLogMessage = e.message ?: "Sync failed",
             )
             SyncOutcome(errors = 1, durationMs = duration)
         }
@@ -194,20 +177,12 @@ class SyncEngine @Inject constructor(
         // Idle follow-up (0 actions, nothing transferred) must not overwrite the real pass's
         // Last sync / Duration — that made multi-minute downloads show "duration: 1s".
         if (finalOutcome.isIdleNoOp && actions.isEmpty()) {
-            if (pair.lastSyncStatus != status) {
-                folderPairRepository.update(pair.copy(lastSyncStatus = status))
-            }
+            finishPair(pair, elapsedStart, status = status, overwriteLastSync = false, wallEnd = wallEnd)
             return finalOutcome
         }
 
         logOutcome(pair.id, wallEnd, finalOutcome)
-        folderPairRepository.update(
-            pair.copy(
-                lastSyncAt = wallEnd,
-                lastSyncDurationMs = durationMs,
-                lastSyncStatus = status,
-            ),
-        )
+        finishPair(pair, elapsedStart, status = status, wallEnd = wallEnd)
         return finalOutcome
     }
 
@@ -326,31 +301,77 @@ class SyncEngine @Inject constructor(
 
     private suspend fun cancelledSync(pair: FolderPairEntity, elapsedStart: Long): SyncOutcome {
         val wallEnd = System.currentTimeMillis()
-        val duration = SystemClock.elapsedRealtime() - elapsedStart
+        val duration = finishPair(
+            pair,
+            elapsedStart,
+            status = "CANCELLED",
+            wallEnd = wallEnd,
+            syncEndMessage = "Cancelled by user",
+        )
         diagnosticLogger.i(TAG, "Sync cancelled for pair='${pair.name}' durationMs=$duration")
-        syncLogRepository.log(
-            SyncLogEntity(
-                folderPairId = pair.id,
-                timestamp = wallEnd,
-                eventType = SyncEventType.SYNC_END,
-                message = "Cancelled by user",
-            ),
-        )
-        folderPairRepository.update(
-            pair.copy(lastSyncAt = wallEnd, lastSyncDurationMs = duration, lastSyncStatus = "CANCELLED"),
-        )
         return SyncOutcome(durationMs = duration, cancelled = true)
     }
 
     private suspend fun failSync(pair: FolderPairEntity, elapsedStart: Long, message: String): SyncOutcome {
         val wallEnd = System.currentTimeMillis()
-        val duration = SystemClock.elapsedRealtime() - elapsedStart
-        diagnosticLogger.e(TAG, "Sync failed for pair='${pair.name}': $message durationMs=$duration")
-        syncLogRepository.log(SyncLogEntity(folderPairId = pair.id, timestamp = wallEnd, eventType = SyncEventType.ERROR, message = message))
-        folderPairRepository.update(
-            pair.copy(lastSyncAt = wallEnd, lastSyncDurationMs = duration, lastSyncStatus = "ERROR"),
+        val duration = finishPair(
+            pair,
+            elapsedStart,
+            status = "ERROR",
+            wallEnd = wallEnd,
+            errorLogMessage = message,
         )
+        diagnosticLogger.e(TAG, "Sync failed for pair='${pair.name}': $message durationMs=$duration")
         return SyncOutcome(errors = 1, durationMs = duration)
+    }
+
+    /**
+     * Centralizes Last sync / Duration / Status DB writes for success, error, cancel, and idle paths.
+     * @param overwriteLastSync when false (idle follow-up), only refresh status if it changed.
+     * @return duration in ms for [SyncOutcome] / logs
+     */
+    private suspend fun finishPair(
+        pair: FolderPairEntity,
+        elapsedStart: Long,
+        status: String,
+        wallEnd: Long = System.currentTimeMillis(),
+        overwriteLastSync: Boolean = true,
+        errorLogMessage: String? = null,
+        syncEndMessage: String? = null,
+    ): Long {
+        val duration = SystemClock.elapsedRealtime() - elapsedStart
+        if (errorLogMessage != null) {
+            syncLogRepository.log(
+                SyncLogEntity(
+                    folderPairId = pair.id,
+                    timestamp = wallEnd,
+                    eventType = SyncEventType.ERROR,
+                    message = errorLogMessage,
+                ),
+            )
+        }
+        if (syncEndMessage != null) {
+            syncLogRepository.log(
+                SyncLogEntity(
+                    folderPairId = pair.id,
+                    timestamp = wallEnd,
+                    eventType = SyncEventType.SYNC_END,
+                    message = syncEndMessage,
+                ),
+            )
+        }
+        if (overwriteLastSync) {
+            folderPairRepository.update(
+                pair.copy(
+                    lastSyncAt = wallEnd,
+                    lastSyncDurationMs = duration,
+                    lastSyncStatus = status,
+                ),
+            )
+        } else if (pair.lastSyncStatus != status) {
+            folderPairRepository.update(pair.copy(lastSyncStatus = status))
+        }
+        return duration
     }
 
     private companion object {

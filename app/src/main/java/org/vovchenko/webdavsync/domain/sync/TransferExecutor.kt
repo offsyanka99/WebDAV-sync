@@ -1,11 +1,12 @@
 package org.vovchenko.webdavsync.domain.sync
 
 import android.net.Uri
+import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -70,9 +71,8 @@ class TransferExecutor @Inject constructor(
 
         // Directories run sequentially, already ordered shallowest-first by the diff calculator.
         for (action in directoryActions) {
-            if (syncControl.shouldStop()) break
-            syncControl.awaitWhilePaused()
-            if (syncControl.shouldStop()) break
+            if (shouldAbortAtCheckpoint()) break
+            diagnosticLogger.i(TAG, "Dir action start type=${action::class.simpleName} path=${action.relativePath}")
             val ok = runCatching { executeDirectoryAction(action, ctx) }.getOrElse {
                 if (it is CancellationException) throw it
                 diagnosticLogger.e(TAG, "Directory action failed path=${action.relativePath}", it)
@@ -81,6 +81,8 @@ class TransferExecutor @Inject constructor(
             if (!ok) {
                 directoryErrors++
                 diagnosticLogger.w(TAG, "Directory action failed path=${action.relativePath}")
+            } else {
+                diagnosticLogger.i(TAG, "Dir action done path=${action.relativePath}")
             }
         }
 
@@ -89,7 +91,16 @@ class TransferExecutor @Inject constructor(
             return SyncOutcome(errors = directoryErrors, cancelled = true)
         }
 
-        val semaphore = Semaphore(ctx.maxParallelTransfers.coerceAtLeast(1))
+        // Parallel multi‑100MB SAF reads + full-body staging used to OOM/hang with no further
+        // log lines after "Executing transfers". Cap concurrency for heavy upload batches.
+        val parallel = effectiveFileParallelism(fileActions, ctx)
+        diagnosticLogger.i(
+            TAG,
+            "File phase start pairId=${ctx.folderPairId}: ${fileActions.size} action(s), " +
+                "parallel=$parallel (configured=${ctx.maxParallelTransfers})",
+        )
+        Log.i(TAG, "File phase start pairId=${ctx.folderPairId} actions=${fileActions.size} parallel=$parallel")
+        val semaphore = Semaphore(parallel)
         val results = coroutineScope {
             fileActions.map { action ->
                 async(Dispatchers.IO) {
@@ -147,16 +158,12 @@ class TransferExecutor @Inject constructor(
     }
 
     private suspend fun executeFileActionWithRetry(action: SyncAction, ctx: TransferContext): ActionResult {
-        if (syncControl.shouldStop()) return ActionResult.Skipped
-        syncControl.awaitWhilePaused()
-        if (syncControl.shouldStop()) return ActionResult.Skipped
+        if (shouldAbortAtCheckpoint()) return ActionResult.Skipped
 
         var lastResult: ActionResult = ActionResult.Failed
         val maxAttempts = ctx.retryAttempts.coerceAtLeast(1)
         for (attempt in 1..maxAttempts) {
-            if (syncControl.shouldStop()) return ActionResult.Skipped
-            syncControl.awaitWhilePaused()
-            if (syncControl.shouldStop()) return ActionResult.Skipped
+            if (shouldAbortAtCheckpoint()) return ActionResult.Skipped
 
             lastResult = runCatching { executeFileAction(action, ctx) }.getOrElse {
                 // Cancellation (e.g. this sync got superseded) must propagate, not be treated as a
@@ -190,7 +197,11 @@ class TransferExecutor @Inject constructor(
 
     /** [remoteRelativePath] is the server's actual name; it can differ from [relativePath] (the local-safe canonical path). */
     private suspend fun uploadFile(relativePath: String, remoteRelativePath: String, ctx: TransferContext): ActionResult {
-        val local = localFileIo.statOrNull(ctx.localRootUri, relativePath) ?: return ActionResult.Failed
+        val local = localFileIo.statOrNull(ctx.localRootUri, relativePath)
+        if (local == null) {
+            diagnosticLogger.w(TAG, "Upload skipped — local file not found path=$relativePath")
+            return ActionResult.Failed
+        }
         if (local.sizeBytes <= 0L) {
             diagnosticLogger.w(TAG, "Skip upload of empty local file path=$relativePath")
             return ActionResult.Skipped
@@ -200,12 +211,32 @@ class TransferExecutor @Inject constructor(
             return ActionResult.Skipped
         }
 
-        val input = localFileIo.openInputStream(ctx.localRootUri, relativePath) ?: return ActionResult.Failed
+        diagnosticLogger.i(
+            TAG,
+            "Upload start path=$relativePath remote=$remoteRelativePath size=${local.sizeBytes}",
+        )
+        Log.i(TAG, "Upload start path=$relativePath size=${local.sizeBytes}")
+        // Probe stream is openable before starting HTTP.
+        localFileIo.openInputStream(ctx.localRootUri, relativePath)?.close()
+            ?: run {
+                diagnosticLogger.w(TAG, "Upload failed — cannot open local stream path=$relativePath")
+                return ActionResult.Failed
+            }
         val remotePath = RemotePaths.join(ctx.remoteRootPath, remoteRelativePath)
         val fileName = relativePath.substringAfterLast('/')
-        val result = input.use { ctx.client.upload(remotePath, MimeTypes.guess(fileName), it) }
+        // Re-open SAF stream on every writeTo (Digest retry); do not stage multi‑100MB to cache.
+        val result = ctx.client.upload(
+            remotePath = remotePath,
+            contentType = MimeTypes.guess(fileName),
+            contentLength = local.sizeBytes,
+            openContent = {
+                localFileIo.openInputStream(ctx.localRootUri, relativePath)
+                    ?: throw java.io.IOException("Cannot re-open local stream path=$relativePath")
+            },
+        )
         if (result.isFailure) {
             diagnosticLogger.w(TAG, "Upload failed path=$relativePath: ${result.exceptionOrNull()?.message}")
+            Log.w(TAG, "Upload failed path=$relativePath: ${result.exceptionOrNull()?.message}")
             // Mid-body timeout can leave a truncated object on the server. Delete it when it is
             // smaller than the local source so the next pass retries a clean full PUT instead of
             // entering the conflict / nested-copy cascade.
@@ -244,6 +275,10 @@ class TransferExecutor @Inject constructor(
         val remotePath = RemotePaths.join(ctx.remoteRootPath, remoteRelativePath)
         var baselined = false
         try {
+            diagnosticLogger.i(
+                TAG,
+                "Download start path=$relativePath remote=$remoteRelativePath size=$remoteSizeBytes",
+            )
             val downloadResult = ctx.client.download(remotePath)
             val remoteStream = downloadResult.getOrElse {
                 diagnosticLogger.w(TAG, "Download failed path=$relativePath: ${it.message}")
@@ -384,6 +419,13 @@ class TransferExecutor @Inject constructor(
         )
     }
 
+    /** Pause/cancel checkpoint: await resume, then true if the worker should stop. */
+    private suspend fun shouldAbortAtCheckpoint(): Boolean {
+        if (syncControl.shouldStop()) return true
+        syncControl.awaitWhilePaused()
+        return syncControl.shouldStop()
+    }
+
     /**
      * After a failed PUT, drop a truncated remote object so the next pass uploads cleanly.
      * Only deletes when the remote size is strictly less than the local source size.
@@ -409,8 +451,48 @@ class TransferExecutor @Inject constructor(
         }
     }
 
+    /**
+     * Heavy multi-file uploads (e.g. ~375MB / 12 files) with parallel=4 used to hang: concurrent
+     * SAF multi-stream reads + full-body temp staging exhausted memory/IO with no further logs.
+     * Use serial concurrency when the batch is upload-heavy.
+     */
+    private fun effectiveFileParallelism(fileActions: List<SyncAction>, ctx: TransferContext): Int {
+        val configured = ctx.maxParallelTransfers.coerceAtLeast(1)
+        var uploadCount = 0
+        var totalUploadBytes = 0L
+        var maxUploadBytes = 0L
+        for (action in fileActions) {
+            when (action) {
+                is SyncAction.UploadFile -> {
+                    val size = localFileIo.statOrNull(ctx.localRootUri, action.relativePath)?.sizeBytes ?: 0L
+                    uploadCount++
+                    totalUploadBytes += size
+                    if (size > maxUploadBytes) maxUploadBytes = size
+                }
+                is SyncAction.Conflict -> if (action.winningSide == SyncAction.Side.LOCAL) {
+                    val size = localFileIo.statOrNull(ctx.localRootUri, action.relativePath)?.sizeBytes ?: 0L
+                    uploadCount++
+                    totalUploadBytes += size
+                    if (size > maxUploadBytes) maxUploadBytes = size
+                }
+                else -> Unit
+            }
+        }
+        if (uploadCount == 0) return configured
+        if (maxUploadBytes >= LARGE_FILE_BYTES || totalUploadBytes >= HEAVY_BATCH_BYTES || uploadCount >= 4) {
+            diagnosticLogger.i(
+                TAG,
+                "Throttling upload concurrency to 1 (uploads=$uploadCount totalBytes=$totalUploadBytes max=$maxUploadBytes)",
+            )
+            return 1
+        }
+        return configured
+    }
+
     private companion object {
         const val TAG = "TransferExecutor"
         const val DEFAULT_COPY_BUFFER_SIZE = 8192
+        const val LARGE_FILE_BYTES = 2L * 1024 * 1024 // 2 MiB
+        const val HEAVY_BATCH_BYTES = 32L * 1024 * 1024 // 32 MiB total
     }
 }

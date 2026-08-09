@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import org.vovchenko.webdavsync.data.repository.SettingsRepository
 import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -91,11 +92,23 @@ class DiagnosticLogger @Inject constructor(
             append('\n')
         }
 
+        // Always mirror to logcat so adb/logcat and in-app export see the same progress
+        // (helps debug hangs where the process dies mid-batch before file is re-read).
+        when (level) {
+            "E" -> Log.e(tag, safeMessage, throwable)
+            "W" -> Log.w(tag, safeMessage, throwable)
+            else -> Log.i(tag, safeMessage)
+        }
+
         try {
             synchronized(writeLock) {
                 ensureParent()
                 rotateIfNeeded()
-                logFile.appendText(line)
+                // Write + fsync so a killed process still leaves the last progress line on disk.
+                FileOutputStream(logFile, /* append = */ true).use { fos ->
+                    fos.write(line.toByteArray(Charsets.UTF_8))
+                    fos.fd.sync()
+                }
             }
         } catch (t: Throwable) {
             // Never let logging crash the app; fall back to logcat only.

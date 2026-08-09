@@ -3,6 +3,7 @@ package org.vovchenko.webdavsync.data.local.saf
 import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
+import org.vovchenko.webdavsync.util.RelativePaths
 import javax.inject.Inject
 
 /**
@@ -34,7 +35,7 @@ class LocalTreeScanner @Inject constructor(
             val name = child.name ?: continue
             if (excludeHiddenFiles && name.startsWith(".")) continue
 
-            val relativePath = if (relativePrefix.isEmpty()) name else "$relativePrefix/$name"
+            val relativePath = RelativePaths.joinRelative(relativePrefix, name)
             if (isExcluded(relativePath, excludedSubfolders)) continue
 
             out.add(

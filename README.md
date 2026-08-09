@@ -2,7 +2,7 @@
 
 Android app that keeps local folders and WebDAV remote folders in sync — manually, on a schedule, or when files change.
 
-**Current release:** [v1.0.19](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.0.19)  
+**Current release:** [v1.1.1](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.1.1)  
 **Min Android:** 8.0 (API 26)  
 **License:** [MIT](LICENSE)
 
@@ -104,6 +104,16 @@ Core flow: scan local + remote → diff against last-sync baseline → transfer/
 - **Issues:** [GitHub Issues](https://github.com/offsyanka99/WebDAV-sync/issues)
 
 ## Changelog (recent)
+
+### v1.1.1
+
+- **Fix large multi-file upload hang** — batches of ~100MB–GB (e.g. many ~30MB FLACs) no longer freeze after “Executing transfers…” with zero PUTs on the server. Root cause: parallel full-file staging into app cache under `parallel=4` exhausted SAF I/O/memory.
+- **Streaming WebDAV PUT** — upload streams from SAF with known `Content-Length`; the stream is reopened on Digest/OkHttp `writeTo` retries (no multi‑100MB temp copies).
+- **Auto-throttle upload concurrency** — heavy upload batches (large files / high count / high total bytes) run with `parallel=1` so mobile sync stays reliable.
+- **Unicode path support confirmed** — Cyrillic and other non-English folder/file names (e.g. `!Мой сборник`) upload correctly via percent-encoded path segments.
+- **Better transfer diagnostics** — dir/file phase and per-file upload/download start lines; diagnostic log also mirrors to logcat and fsyncs so a killed process leaves the last progress line.
+- **Code structure cleanup** — shared `SyncOverviewMetrics`, `ManualSyncStarter`, `SettingToggleRow` / `AppScaffold`, `RelativePaths`, `SyncEngine.finishPair`, unified Overview/widget status colors (`SyncStatusDisplay.ColorRole`).
+- Verified on device: **61 files / ~755MB uploaded successfully** (mixed FLAC + Cyrillic MP3 paths) in ~74s with status OK.
 
 ### v1.0.19
 

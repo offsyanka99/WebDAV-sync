@@ -5,8 +5,6 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import androidx.work.WorkInfo
-import androidx.work.WorkManager
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -15,9 +13,9 @@ import kotlinx.coroutines.launch
 import org.vovchenko.webdavsync.MainActivity
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
 import org.vovchenko.webdavsync.data.repository.SyncLogRepository
-import org.vovchenko.webdavsync.domain.sync.RecentChangesCalculator
-import org.vovchenko.webdavsync.sync.worker.SyncWorker
-import org.vovchenko.webdavsync.util.NetworkStatus
+import org.vovchenko.webdavsync.domain.sync.SyncOverviewMetrics
+import org.vovchenko.webdavsync.sync.control.ManualSyncDecision
+import org.vovchenko.webdavsync.sync.control.ManualSyncStarter
 
 /**
  * 4×2 home-screen widget: last sync status, recent change counts, and a Sync button.
@@ -47,13 +45,16 @@ class SyncWidgetProvider : AppWidgetProvider() {
                     val entry = entryPoint(context)
                     val settings = entry.settingsRepository().settings.first()
                     // Widget cannot host the Compose dialog — open Overview so the same warning runs.
-                    if (settings.warnOnMobileNetwork && NetworkStatus.isOnCellularData(context)) {
-                        val open = Intent(context, MainActivity::class.java).apply {
-                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-                            putExtra(MainActivity.EXTRA_REQUEST_SYNC, true)
+                    when (ManualSyncStarter.prepareManualSync(context, settings)) {
+                        ManualSyncDecision.NeedsMobileDataConfirm -> {
+                            val open = Intent(context, MainActivity::class.java).apply {
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                                putExtra(MainActivity.EXTRA_REQUEST_SYNC, true)
+                            }
+                            context.startActivity(open)
+                            return@launch
                         }
-                        context.startActivity(open)
-                        return@launch
+                        ManualSyncDecision.Proceed -> Unit
                     }
                     entry.syncScheduler().enqueueImmediateSync()
                     // Paint from DB + WorkManager only — never force "Syncing…" that can outlive the worker.
@@ -97,22 +98,8 @@ class SyncWidgetProvider : AppWidgetProvider() {
 
         private suspend fun loadState(context: Context, forceIdle: Boolean = false): SyncWidgetState {
             val entry = entryPoint(context)
-            val syncing = if (forceIdle) false else isSyncWorkerRunning(context)
+            val syncing = if (forceIdle) false else entry.syncScheduler().isSyncWorkerRunning()
             return loadState(entry.folderPairRepository(), entry.syncLogRepository(), syncing = syncing)
-        }
-
-        /**
-         * Aligns with Overview: only RUNNING workers count as syncing, so a finished pass that left
-         * an ENQUEUED follow-up waiting on Wi‑Fi does not leave the widget/Overview disagreeing.
-         */
-        private fun isSyncWorkerRunning(context: Context): Boolean {
-            val wm = WorkManager.getInstance(context.applicationContext)
-            fun anyRunning(uniqueName: String): Boolean =
-                runCatching { wm.getWorkInfosForUniqueWork(uniqueName).get() }
-                    .getOrDefault(emptyList())
-                    .any { it.state == WorkInfo.State.RUNNING }
-            return anyRunning(SyncWorker.UNIQUE_MANUAL_WORK_NAME) ||
-                anyRunning(SyncWorker.UNIQUE_PERIODIC_WORK_NAME)
         }
 
         suspend fun loadState(
@@ -122,18 +109,7 @@ class SyncWidgetProvider : AppWidgetProvider() {
         ): SyncWidgetState {
             val folderPairs = folderPairRepository.observeAll().first()
             val logs = syncLogRepository.observeRecent(100).first()
-            val mostRecentPair = folderPairs.filter { it.lastSyncAt != null }.maxByOrNull { it.lastSyncAt!! }
-            val recent = RecentChangesCalculator.fromLogs(logs)
-            return SyncWidgetState(
-                status = mostRecentPair?.lastSyncStatus ?: "Ready",
-                lastSyncAtMillis = mostRecentPair?.lastSyncAt,
-                lastSyncDurationMs = mostRecentPair?.lastSyncDurationMs,
-                uploaded = recent.uploaded,
-                downloaded = recent.downloaded,
-                deletedDevice = recent.deletedDevice,
-                deletedCloud = recent.deletedCloud,
-                syncing = syncing,
-            )
+            return SyncWidgetState.from(SyncOverviewMetrics.from(folderPairs, logs, syncing = syncing))
         }
 
         private fun pushState(context: Context, state: SyncWidgetState) {

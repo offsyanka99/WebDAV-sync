@@ -134,12 +134,11 @@ fun OverviewScreen(
     }
 }
 
-/** Same kind → color mapping as the home-screen widget. */
+/** Same color-role mapping as the home-screen widget ([SyncStatusDisplay.colorRole]). */
 private fun statusColor(state: OverviewUiState): Color =
-    when (SyncStatusDisplay.resolve(state.lastSyncStatus, state.syncing).kind) {
-        SyncStatusDisplay.Kind.SYNCING -> StatusWarn
-        SyncStatusDisplay.Kind.OK, SyncStatusDisplay.Kind.READY -> StatusOk
-        SyncStatusDisplay.Kind.ERROR -> StatusError
-        SyncStatusDisplay.Kind.CANCELLED -> StatusWarn
-        SyncStatusDisplay.Kind.OTHER -> Color.Unspecified
+    when (SyncStatusDisplay.resolve(state.lastSyncStatus, state.syncing).colorRole) {
+        SyncStatusDisplay.ColorRole.WARN -> StatusWarn
+        SyncStatusDisplay.ColorRole.OK -> StatusOk
+        SyncStatusDisplay.ColorRole.ERROR -> StatusError
+        SyncStatusDisplay.ColorRole.NEUTRAL -> Color.Unspecified
     }

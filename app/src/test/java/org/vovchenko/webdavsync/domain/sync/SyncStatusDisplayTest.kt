@@ -32,4 +32,24 @@ class SyncStatusDisplayTest {
         assertEquals(SyncStatusDisplay.Kind.READY, r.kind)
         assertEquals(SyncStatusDisplay.TEXT_READY, r.text)
     }
+
+    @Test
+    fun `color roles match Overview and widget mapping`() {
+        assertEquals(
+            SyncStatusDisplay.ColorRole.WARN,
+            SyncStatusDisplay.resolve("ERROR", syncing = true).colorRole,
+        )
+        assertEquals(
+            SyncStatusDisplay.ColorRole.ERROR,
+            SyncStatusDisplay.resolve("ERROR", syncing = false).colorRole,
+        )
+        assertEquals(
+            SyncStatusDisplay.ColorRole.OK,
+            SyncStatusDisplay.resolve("OK", syncing = false).colorRole,
+        )
+        assertEquals(
+            SyncStatusDisplay.ColorRole.WARN,
+            SyncStatusDisplay.resolve("CANCELLED", syncing = false).colorRole,
+        )
+    }
 }

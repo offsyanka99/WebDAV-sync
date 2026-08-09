@@ -21,10 +21,23 @@ object SyncStatusDisplay {
         OTHER,
     }
 
+    /**
+     * Platform-neutral color bucket so Compose and RemoteViews map the same Kind the same way
+     * without sharing Compose [androidx.compose.ui.graphics.Color] in the domain layer.
+     */
+    enum class ColorRole {
+        OK,
+        WARN,
+        ERROR,
+        NEUTRAL,
+    }
+
     data class Resolved(
         val text: String,
         val kind: Kind,
-    )
+    ) {
+        val colorRole: ColorRole get() = colorRole(kind)
+    }
 
     fun resolve(lastSyncStatus: String?, syncing: Boolean): Resolved {
         if (syncing) {
@@ -38,6 +51,13 @@ object SyncStatusDisplay {
             "READY" -> Resolved(text = TEXT_READY, kind = Kind.READY)
             else -> Resolved(text = lastSyncStatus, kind = Kind.OTHER)
         }
+    }
+
+    fun colorRole(kind: Kind): ColorRole = when (kind) {
+        Kind.SYNCING, Kind.CANCELLED -> ColorRole.WARN
+        Kind.ERROR -> ColorRole.ERROR
+        Kind.OK, Kind.READY -> ColorRole.OK
+        Kind.OTHER -> ColorRole.NEUTRAL
     }
 
     const val TEXT_SYNCING = "Sync in process..."

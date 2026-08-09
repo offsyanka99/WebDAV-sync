@@ -25,10 +25,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -41,6 +39,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import org.vovchenko.webdavsync.data.model.SyncMethod
+import org.vovchenko.webdavsync.ui.components.AppScaffold
 import org.vovchenko.webdavsync.ui.components.ToggleRow
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -66,14 +65,10 @@ fun AddEditFolderPairScreen(
     var syncMethodMenuExpanded by remember { mutableStateOf(false) }
     var newExcludedPath by remember { mutableStateOf("") }
 
-    Scaffold(
+    AppScaffold(
+        title = if (uiState.isEditing) "Edit folder pair" else "Add folder pair",
+        onBack = onBack,
         modifier = modifier,
-        topBar = {
-            TopAppBar(
-                title = { Text(if (uiState.isEditing) "Edit folder pair" else "Add folder pair") },
-                navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
-            )
-        },
     ) { innerPadding ->
         Column(
             modifier = Modifier

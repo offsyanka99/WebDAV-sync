@@ -18,7 +18,6 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -185,7 +184,10 @@ fun LabelWithInfoIcon(
     }
 }
 
-/** A label + toggle row, e.g. "Enable sync". Optional [infoDescription] adds an (i) popup. */
+/**
+ * Compact label + switch. Prefer [SettingToggleRow] for new settings with help text;
+ * this remains a thin wrapper for simple toggles (folder pair options, etc.).
+ */
 @Composable
 fun ToggleRow(
     label: String,
@@ -194,20 +196,12 @@ fun ToggleRow(
     modifier: Modifier = Modifier,
     infoDescription: String? = null,
 ) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(top = 8.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        LabelWithInfoIcon(
-            label = label,
-            infoDescription = infoDescription,
-            modifier = Modifier
-                .weight(1f)
-                .padding(end = 8.dp),
-        )
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
-    }
+    SettingToggleRow(
+        label = label,
+        checked = checked,
+        onCheckedChange = onCheckedChange,
+        modifier = modifier,
+        help = infoDescription,
+        helpStyle = SettingHelpStyle.InlineInfo,
+    )
 }

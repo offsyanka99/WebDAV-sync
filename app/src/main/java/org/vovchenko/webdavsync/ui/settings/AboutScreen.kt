@@ -11,12 +11,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -29,11 +26,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import org.vovchenko.webdavsync.BuildConfig
 import org.vovchenko.webdavsync.R
+import org.vovchenko.webdavsync.ui.components.AppScaffold
 import org.vovchenko.webdavsync.ui.components.WebDavSyncTitle
 
 private const val CONTACT_EMAIL = "hummersoft@mailbox.org"
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AboutScreen(
     modifier: Modifier = Modifier,
@@ -41,14 +38,10 @@ fun AboutScreen(
 ) {
     val context = LocalContext.current
 
-    Scaffold(
+    AppScaffold(
+        title = "About",
+        onBack = onBack,
         modifier = modifier,
-        topBar = {
-            TopAppBar(
-                title = { Text("About") },
-                navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
-            )
-        },
     ) { innerPadding ->
         Column(
             modifier = Modifier

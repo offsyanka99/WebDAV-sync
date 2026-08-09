@@ -78,12 +78,11 @@ class SyncScheduler @Inject constructor(
         // Security audit finding #7: manual syncs must respect the same Wi-Fi-only/charging
         // constraints as scheduled syncs, otherwise "Wi-Fi only" can be silently bypassed.
         val settings = settingsRepository.settings.first()
-        val request = OneTimeWorkRequestBuilder<SyncWorker>()
-            .setInputData(inputData)
-            .setConstraints(buildConstraints(settings))
-            .build()
-
-        workManager.enqueueUniqueWork(SyncWorker.UNIQUE_MANUAL_WORK_NAME, ExistingWorkPolicy.KEEP, request)
+        workManager.enqueueUniqueWork(
+            SyncWorker.UNIQUE_MANUAL_WORK_NAME,
+            ExistingWorkPolicy.KEEP,
+            buildManualSyncRequest(settings, inputData),
+        )
     }
 
     /**
@@ -95,21 +94,16 @@ class SyncScheduler @Inject constructor(
         if (!requested) return
         diagnosticLogger.i(TAG, "Enqueueing follow-up sync after completed pass")
         val settings = settingsRepository.settings.first()
-        val request = OneTimeWorkRequestBuilder<SyncWorker>()
-            .setConstraints(buildConstraints(settings))
-            .build()
         // APPEND runs after the finishing worker; APPEND_OR_REPLACE if the prior work was cancelled.
         workManager.enqueueUniqueWork(
             SyncWorker.UNIQUE_MANUAL_WORK_NAME,
             ExistingWorkPolicy.APPEND_OR_REPLACE,
-            request,
+            buildManualSyncRequest(settings),
         )
     }
 
     private fun hasActiveManualWork(): Boolean {
-        val infos = runCatching {
-            workManager.getWorkInfosForUniqueWork(SyncWorker.UNIQUE_MANUAL_WORK_NAME).get()
-        }.getOrDefault(emptyList())
+        val infos = workInfos(SyncWorker.UNIQUE_MANUAL_WORK_NAME)
         return infos.any {
             it.state == WorkInfo.State.ENQUEUED ||
                 it.state == WorkInfo.State.RUNNING ||
@@ -117,12 +111,16 @@ class SyncScheduler @Inject constructor(
         }
     }
 
-    private fun hasRunningPeriodicWork(): Boolean {
-        val infos = runCatching {
-            workManager.getWorkInfosForUniqueWork(SyncWorker.UNIQUE_PERIODIC_WORK_NAME).get()
-        }.getOrDefault(emptyList())
-        return infos.any { it.state == WorkInfo.State.RUNNING }
-    }
+    private fun hasRunningPeriodicWork(): Boolean =
+        workInfos(SyncWorker.UNIQUE_PERIODIC_WORK_NAME).any { it.state == WorkInfo.State.RUNNING }
+
+    /**
+     * True only while a sync worker is **RUNNING** (blocking snapshot for widget paint).
+     * Same rule as [observeIsSyncActive].
+     */
+    fun isSyncWorkerRunning(): Boolean =
+        workInfos(SyncWorker.UNIQUE_MANUAL_WORK_NAME).any { it.state == WorkInfo.State.RUNNING } ||
+            workInfos(SyncWorker.UNIQUE_PERIODIC_WORK_NAME).any { it.state == WorkInfo.State.RUNNING }
 
     /**
      * True only while a sync worker is **RUNNING**.
@@ -138,6 +136,18 @@ class SyncScheduler @Inject constructor(
         manual.any { it.state == WorkInfo.State.RUNNING } ||
             periodic.any { it.state == WorkInfo.State.RUNNING }
     }
+
+    private fun workInfos(uniqueName: String): List<WorkInfo> =
+        runCatching { workManager.getWorkInfosForUniqueWork(uniqueName).get() }
+            .getOrDefault(emptyList())
+
+    private fun buildManualSyncRequest(
+        settings: AppSettings,
+        inputData: Data = Data.EMPTY,
+    ) = OneTimeWorkRequestBuilder<SyncWorker>()
+        .setInputData(inputData)
+        .setConstraints(buildConstraints(settings))
+        .build()
 
     private fun buildConstraints(settings: AppSettings): Constraints = Constraints.Builder()
         .setRequiredNetworkType(if (settings.wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED)

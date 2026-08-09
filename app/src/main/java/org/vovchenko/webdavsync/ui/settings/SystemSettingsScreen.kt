@@ -18,14 +18,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
@@ -43,12 +40,14 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import org.vovchenko.webdavsync.data.local.diagnostics.DiagnosticLog
 import org.vovchenko.webdavsync.sync.worker.BatteryOptimizationHelper
+import org.vovchenko.webdavsync.ui.components.AppScaffold
+import org.vovchenko.webdavsync.ui.components.SettingHelpStyle
+import org.vovchenko.webdavsync.ui.components.SettingToggleRow
 
 /**
  * Settings → Configuration (WiFi-VPN style): card rows with switch + help text for battery,
  * unused-app management, auto-start, and diagnostic logging.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SystemSettingsScreen(
     modifier: Modifier = Modifier,
@@ -87,14 +86,10 @@ fun SystemSettingsScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    Scaffold(
+    AppScaffold(
+        title = "Configuration",
+        onBack = onBack,
         modifier = modifier,
-        topBar = {
-            TopAppBar(
-                title = { Text("Configuration") },
-                navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
-            )
-        },
     ) { innerPadding ->
         Column(
             modifier = Modifier
@@ -104,12 +99,13 @@ fun SystemSettingsScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            ConfigurationSwitchCard(
-                title = "Battery optimization",
+            SettingToggleRow(
+                label = "Battery optimization",
                 help = "When on, the app is exempt from battery optimization (Allow background usage / Unrestricted) so sync is less likely to be stopped. Android may open a system dialog or the App battery screen — confirm there, then return.",
+                helpStyle = SettingHelpStyle.CardBody,
                 checked = batteryExempt,
                 onCheckedChange = { wantExempt ->
-                    if (wantExempt == batteryExempt) return@ConfigurationSwitchCard
+                    if (wantExempt == batteryExempt) return@SettingToggleRow
                     if (wantExempt) {
                         // Optimistic UI: stay on until ON_RESUME re-reads the real system state.
                         batteryExempt = true
@@ -146,15 +142,16 @@ fun SystemSettingsScreen(
                 },
             )
 
-            ConfigurationSwitchCard(
-                title = "Manage app if unused",
+            SettingToggleRow(
+                label = "Manage app if unused",
                 help = "Matches the system setting. Leave this off so Android does not pause the app or remove permissions when it looks unused — needed for reliable background sync.",
+                helpStyle = SettingHelpStyle.CardBody,
                 checked = manageUnusedOn,
                 enabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R,
                 onCheckedChange = {
                     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
                         Toast.makeText(context, "This setting is not available on this device", Toast.LENGTH_SHORT).show()
-                        return@ConfigurationSwitchCard
+                        return@SettingToggleRow
                     }
                     manageUnusedOn = isManageUnusedEnabled(context)
                     openUnusedAppSettings(context, unusedSettingsLauncher)
@@ -166,9 +163,10 @@ fun SystemSettingsScreen(
                 },
             )
 
-            ConfigurationSwitchCard(
-                title = "Auto-start after reboot",
+            SettingToggleRow(
+                label = "Auto-start after reboot",
                 help = "When enabled, periodic sync is rescheduled after the phone reboots (requires auto-sync enabled under Synchronization).",
+                helpStyle = SettingHelpStyle.CardBody,
                 checked = settings.autoStartOnBoot,
                 onCheckedChange = { viewModel.update { s -> s.copy(autoStartOnBoot = it) } },
             )
@@ -233,46 +231,6 @@ fun SystemSettingsScreen(
                     }
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun ConfigurationSwitchCard(
-    title: String,
-    help: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-    enabled: Boolean = true,
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.bodyLarge,
-                    modifier = Modifier.weight(1f).padding(end = 12.dp),
-                )
-                Switch(
-                    checked = checked,
-                    onCheckedChange = onCheckedChange,
-                    enabled = enabled,
-                )
-            }
-            Text(
-                text = help,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 8.dp),
-            )
         }
     }
 }

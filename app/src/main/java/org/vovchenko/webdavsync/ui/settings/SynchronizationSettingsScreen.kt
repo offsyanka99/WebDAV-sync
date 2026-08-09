@@ -7,33 +7,29 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import org.vovchenko.webdavsync.ui.components.AppScaffold
 import org.vovchenko.webdavsync.ui.components.LabelWithInfoIcon
+import org.vovchenko.webdavsync.ui.components.SettingHelpStyle
+import org.vovchenko.webdavsync.ui.components.SettingToggleRow
+import org.vovchenko.webdavsync.ui.components.SizeLimitMbField
 import org.vovchenko.webdavsync.ui.components.ToggleRow
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SynchronizationSettingsScreen(
     modifier: Modifier = Modifier,
@@ -42,14 +38,10 @@ fun SynchronizationSettingsScreen(
 ) {
     val settings by viewModel.settings.collectAsState()
 
-    Scaffold(
+    AppScaffold(
+        title = "Synchronization",
+        onBack = onBack,
         modifier = modifier,
-        topBar = {
-            TopAppBar(
-                title = { Text("Synchronization") },
-                navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
-            )
-        },
     ) { innerPadding ->
         Column(
             modifier = Modifier
@@ -59,46 +51,37 @@ fun SynchronizationSettingsScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            OutlinedTextField(
-                value = settings.uploadSizeLimitBytes?.let { (it / (1024 * 1024)).toString() } ?: "",
-                onValueChange = { text ->
-                    val mb = text.toLongOrNull()
-                    viewModel.update { it.copy(uploadSizeLimitBytes = mb?.let { v -> v * 1024 * 1024 }) }
-                },
-                label = { Text("Upload size limit (MB, blank = no limit)") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
+            SizeLimitMbField(
+                label = "Upload size limit (MB, blank = no limit)",
+                valueBytes = settings.uploadSizeLimitBytes,
+                onBytesChange = { bytes -> viewModel.update { it.copy(uploadSizeLimitBytes = bytes) } },
             )
-            OutlinedTextField(
-                value = settings.downloadSizeLimitBytes?.let { (it / (1024 * 1024)).toString() } ?: "",
-                onValueChange = { text ->
-                    val mb = text.toLongOrNull()
-                    viewModel.update { it.copy(downloadSizeLimitBytes = mb?.let { v -> v * 1024 * 1024 }) }
-                },
-                label = { Text("Download size limit (MB, blank = no limit)") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
+            SizeLimitMbField(
+                label = "Download size limit (MB, blank = no limit)",
+                valueBytes = settings.downloadSizeLimitBytes,
+                onBytesChange = { bytes -> viewModel.update { it.copy(downloadSizeLimitBytes = bytes) } },
             )
 
-            ToggleRow(
+            SettingToggleRow(
                 label = "Wi-Fi only",
                 checked = settings.wifiOnly,
                 onCheckedChange = { viewModel.update { s -> s.copy(wifiOnly = it) } },
-                infoDescription = WIFI_ONLY_INFO,
+                help = WIFI_ONLY_INFO,
+                helpStyle = SettingHelpStyle.InlineInfo,
             )
-            ToggleRow(
+            SettingToggleRow(
                 label = "Warn before syncing on mobile data",
                 checked = settings.warnOnMobileNetwork,
                 onCheckedChange = { viewModel.update { s -> s.copy(warnOnMobileNetwork = it) } },
-                infoDescription = WARN_MOBILE_INFO,
+                help = WARN_MOBILE_INFO,
+                helpStyle = SettingHelpStyle.InlineInfo,
             )
-            ToggleRow(
+            SettingToggleRow(
                 label = "Allow parallel transfers",
                 checked = settings.allowParallelTransfers,
                 onCheckedChange = { viewModel.update { s -> s.copy(allowParallelTransfers = it) } },
-                infoDescription = PARALLEL_TRANSFERS_INFO,
+                help = PARALLEL_TRANSFERS_INFO,
+                helpStyle = SettingHelpStyle.InlineInfo,
             )
 
             HorizontalDivider()

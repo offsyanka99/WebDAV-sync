@@ -18,12 +18,11 @@ object SyncWidgetRenderer {
 
         // Identical labels/colors to Overview via [SyncStatusDisplay].
         val resolved = SyncStatusDisplay.resolve(state.status, state.syncing)
-        val statusColorRes = when (resolved.kind) {
-            SyncStatusDisplay.Kind.SYNCING -> R.color.status_warn
-            SyncStatusDisplay.Kind.ERROR -> R.color.status_error
-            SyncStatusDisplay.Kind.CANCELLED -> R.color.status_warn
-            SyncStatusDisplay.Kind.OK, SyncStatusDisplay.Kind.READY -> R.color.status_ok
-            SyncStatusDisplay.Kind.OTHER -> R.color.md_theme_on_surface
+        val statusColorRes = when (resolved.colorRole) {
+            SyncStatusDisplay.ColorRole.WARN -> R.color.status_warn
+            SyncStatusDisplay.ColorRole.ERROR -> R.color.status_error
+            SyncStatusDisplay.ColorRole.OK -> R.color.status_ok
+            SyncStatusDisplay.ColorRole.NEUTRAL -> R.color.md_theme_on_surface
         }
         views.setTextViewText(R.id.widget_status, resolved.text)
         views.setTextColor(R.id.widget_status, ContextCompat.getColor(context, statusColorRes))

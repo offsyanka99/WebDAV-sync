@@ -4,6 +4,7 @@ import org.vovchenko.webdavsync.data.local.saf.PathExclusion
 import org.vovchenko.webdavsync.data.remote.DavHref
 import org.vovchenko.webdavsync.data.remote.WebDavClient
 import org.vovchenko.webdavsync.data.remote.WebDavPathSafety
+import org.vovchenko.webdavsync.util.RelativePaths
 import javax.inject.Inject
 
 /** One remote file/folder entry, relative to a folder pair's remote root. */
@@ -43,7 +44,7 @@ class RemoteTreeScanner @Inject constructor() {
             // Decode last segment so "test%201" / "test 1" both become "test 1".
             val name = DavHref.childName(resource.path) ?: continue
 
-            val relativePath = if (relativePrefix.isEmpty()) name else "$relativePrefix/$name"
+            val relativePath = RelativePaths.joinRelative(relativePrefix, name)
             if (PathExclusion.isExcluded(relativePath, excludedSubfolders)) continue
 
             val childRemotePath = RemotePaths.join(remotePath, name)
@@ -83,4 +84,7 @@ object RemotePaths {
             else -> "$trimmedBase/$trimmedSeg"
         }
     }
+
+    /** @see RelativePaths.joinRelative */
+    fun joinRelative(prefix: String, name: String): String = RelativePaths.joinRelative(prefix, name)
 }

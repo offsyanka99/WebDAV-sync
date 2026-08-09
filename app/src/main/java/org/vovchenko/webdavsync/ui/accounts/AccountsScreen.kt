@@ -13,18 +13,15 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -38,10 +35,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import org.vovchenko.webdavsync.data.local.WebDavAccountEntity
+import org.vovchenko.webdavsync.ui.components.AppScaffold
 import org.vovchenko.webdavsync.ui.components.LabeledRow
 import org.vovchenko.webdavsync.ui.components.SectionCard
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AccountsScreen(
     modifier: Modifier = Modifier,
@@ -61,17 +58,11 @@ fun AccountsScreen(
         }
     }
 
-    Scaffold(
+    AppScaffold(
+        title = "Accounts",
+        onBack = onBack,
         modifier = modifier,
         snackbarHost = { SnackbarHost(snackbarHostState) { Snackbar(it) } },
-        topBar = {
-            TopAppBar(
-                title = { Text("Accounts") },
-                navigationIcon = {
-                    TextButton(onClick = onBack) { Text("Back") }
-                },
-            )
-        },
         floatingActionButton = {
             FloatingActionButton(onClick = onAddAccountClick) {
                 Icon(imageVector = Icons.Filled.Add, contentDescription = "Add account")
