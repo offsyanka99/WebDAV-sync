@@ -53,8 +53,13 @@ class WebDavClientFactory @Inject constructor(
 
     private fun baseBuilder(): OkHttpClient.Builder = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .writeTimeout(60, TimeUnit.SECONDS)
+        // Multi-MB APK / photo uploads on mobile routinely exceed 60s. A short write timeout
+        // aborted PUT mid-body, left partial files on the server, and the next two-way pass
+        // treated "local full + remote partial" as a true conflict → nested "(conflicted copy)"
+        // files forever. 0 = no timeout (OkHttp); body progress is gated by the OS/TCP stack.
+        .readTimeout(0, TimeUnit.SECONDS)
+        .writeTimeout(0, TimeUnit.SECONDS)
+        .callTimeout(0, TimeUnit.SECONDS)
         // Security audit finding #6: don't silently follow a redirect to another host/scheme —
         // that could otherwise leak Basic/Digest credentials to an attacker-controlled origin.
         .followRedirects(false)

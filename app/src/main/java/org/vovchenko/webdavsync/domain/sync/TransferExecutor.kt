@@ -206,6 +206,10 @@ class TransferExecutor @Inject constructor(
         val result = input.use { ctx.client.upload(remotePath, MimeTypes.guess(fileName), it) }
         if (result.isFailure) {
             diagnosticLogger.w(TAG, "Upload failed path=$relativePath: ${result.exceptionOrNull()?.message}")
+            // Mid-body timeout can leave a truncated object on the server. Delete it when it is
+            // smaller than the local source so the next pass retries a clean full PUT instead of
+            // entering the conflict / nested-copy cascade.
+            runCatching { deleteIncompleteRemoteAfterFailedUpload(remotePath, local.sizeBytes, ctx) }
             return ActionResult.Failed
         }
 
@@ -314,6 +318,18 @@ class TransferExecutor @Inject constructor(
 
     private suspend fun resolveConflict(action: SyncAction.Conflict, ctx: TransferContext): ActionResult {
         val relativePath = action.relativePath
+        // Never nest: if we somehow still get a Conflict on an existing conflicted-copy path,
+        // reconcile by size instead of minting "… (conflicted copy) (conflicted copy)…".
+        if (isConflictedCopyPath(relativePath)) {
+            diagnosticLogger.w(TAG, "Skip nested conflict path=$relativePath — repairing by size")
+            val local = localFileIo.statOrNull(ctx.localRootUri, relativePath)
+            return if (local != null) {
+                uploadFile(relativePath, action.remoteRelativePath, ctx)
+            } else {
+                downloadFile(relativePath, action.remoteRelativePath, remoteSizeBytes = 0L, ctx)
+            }
+        }
+
         val losingSide = if (action.winningSide == SyncAction.Side.LOCAL) SyncAction.Side.REMOTE else SyncAction.Side.LOCAL
         val conflictCopyPath = conflictResolver.conflictedCopyPath(relativePath, losingSide)
 
@@ -339,12 +355,22 @@ class TransferExecutor @Inject constructor(
             SyncAction.Side.LOCAL -> uploadFile(relativePath, action.remoteRelativePath, ctx)
             SyncAction.Side.REMOTE -> downloadFile(relativePath, action.remoteRelativePath, remoteSizeBytes = 0L, ctx)
         }
-        return if (applied is ActionResult.Failed) {
-            ActionResult.Failed
-        } else {
-            diagnosticLogger.i(TAG, "Conflict resolved path=$relativePath winner=${action.winningSide} copy=$conflictCopyPath")
-            ActionResult.ConflictResolved(action.winningSide)
+        if (applied is ActionResult.Failed) {
+            return ActionResult.Failed
         }
+
+        // Upload the preserved copy in the same pass so the next follow-up does not treat it as a
+        // brand-new local file that races with a partial remote PUT after a timeout.
+        val copyUpload = uploadFile(conflictCopyPath, conflictCopyPath, ctx)
+        if (copyUpload is ActionResult.Failed || copyUpload is ActionResult.Skipped) {
+            diagnosticLogger.w(
+                TAG,
+                "Conflict copy not uploaded yet path=$conflictCopyPath result=$copyUpload — will retry next pass",
+            )
+        }
+
+        diagnosticLogger.i(TAG, "Conflict resolved path=$relativePath winner=${action.winningSide} copy=$conflictCopyPath")
+        return ActionResult.ConflictResolved(action.winningSide)
     }
 
     private suspend fun saveBaseline(folderPairId: Long, relativePath: String, sizeBytes: Long, mtime: Long) {
@@ -356,6 +382,31 @@ class TransferExecutor @Inject constructor(
                 lastSyncedSize = sizeBytes,
             ),
         )
+    }
+
+    /**
+     * After a failed PUT, drop a truncated remote object so the next pass uploads cleanly.
+     * Only deletes when the remote size is strictly less than the local source size.
+     */
+    private suspend fun deleteIncompleteRemoteAfterFailedUpload(
+        remotePath: String,
+        localSizeBytes: Long,
+        ctx: TransferContext,
+    ) {
+        val parent = remotePath.substringBeforeLast('/', missingDelimiterValue = "")
+        val name = remotePath.substringAfterLast('/')
+        val listing = ctx.client.list(if (parent.isEmpty()) "/" else parent).getOrNull() ?: return
+        val remote = listing.firstOrNull { resource ->
+            !resource.isDirectory && resource.path.trimEnd('/').substringAfterLast('/') == name
+        } ?: return
+        val remoteSize = remote.sizeBytes
+        if (remoteSize in 1 until localSizeBytes) {
+            diagnosticLogger.w(
+                TAG,
+                "Removing incomplete remote after failed upload path=$remotePath remoteSize=$remoteSize localSize=$localSizeBytes",
+            )
+            ctx.client.delete(remotePath)
+        }
     }
 
     private companion object {

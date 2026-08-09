@@ -1,8 +1,6 @@
 package org.vovchenko.webdavsync.ui.overview
 
 import android.content.Context
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -21,7 +19,9 @@ import org.vovchenko.webdavsync.data.repository.SettingsRepository
 import org.vovchenko.webdavsync.data.repository.SyncLogRepository
 import org.vovchenko.webdavsync.data.repository.WebDavAccountRepository
 import org.vovchenko.webdavsync.domain.sync.RecentChangesCalculator
+import org.vovchenko.webdavsync.domain.sync.SyncStatusDisplay
 import org.vovchenko.webdavsync.sync.worker.SyncScheduler
+import org.vovchenko.webdavsync.util.NetworkStatus
 import javax.inject.Inject
 
 data class OverviewUiState(
@@ -37,9 +37,9 @@ data class OverviewUiState(
     /** True while a sync worker is RUNNING (not merely ENQUEUED waiting on constraints). */
     val syncing: Boolean = false,
 ) {
-    /** Value shown in the Status row — live "in process" only while transfers are active. */
+    /** Same labels as the home-screen widget ([SyncStatusDisplay]). */
     val statusDisplay: String
-        get() = if (syncing) "Sync in process..." else (lastSyncStatus ?: "Ready")
+        get() = SyncStatusDisplay.resolve(lastSyncStatus, syncing).text
 }
 
 @HiltViewModel
@@ -79,33 +79,30 @@ class OverviewViewModel @Inject constructor(
 
     /** Entry point for the Sync button — may show a mobile-data warning first. */
     fun requestSync() {
-        if (uiState.value.syncing) return
+        // Still allow the mobile-data dialog even if a pass is already running (user may have
+        // been surprised by auto/folder-watch sync). Only block starting another pass when busy
+        // without needing a warning.
         viewModelScope.launch {
             val settings = settingsRepository.settings.first()
-            if (settings.warnOnMobileNetwork && isOnCellularData()) {
+            val onCellular = NetworkStatus.isOnCellularData(context)
+            if (settings.warnOnMobileNetwork && onCellular) {
                 _showMobileDataWarning.value = true
-            } else {
-                syncScheduler.enqueueImmediateSync()
+                return@launch
             }
+            if (uiState.value.syncing) return@launch
+            syncScheduler.enqueueImmediateSync()
         }
     }
 
     fun confirmMobileDataSync() {
         _showMobileDataWarning.value = false
-        viewModelScope.launch { syncScheduler.enqueueImmediateSync() }
+        viewModelScope.launch {
+            if (uiState.value.syncing) return@launch
+            syncScheduler.enqueueImmediateSync()
+        }
     }
 
     fun dismissMobileDataWarning() {
         _showMobileDataWarning.value = false
-    }
-
-    private fun isOnCellularData(): Boolean {
-        val cm = context.getSystemService(ConnectivityManager::class.java) ?: return false
-        val network = cm.activeNetwork ?: return false
-        val caps = cm.getNetworkCapabilities(network) ?: return false
-        val cellular = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
-        val wifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-        val ethernet = caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-        return cellular && !wifi && !ethernet
     }
 }

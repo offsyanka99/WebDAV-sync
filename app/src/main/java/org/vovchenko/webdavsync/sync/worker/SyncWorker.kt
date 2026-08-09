@@ -54,7 +54,8 @@ class SyncWorker @AssistedInject constructor(
         setForeground(
             notificationHelper.foregroundInfo(applicationContext.getString(R.string.sync_notification_starting)),
         )
-        SyncWidgetProvider.showSyncing(applicationContext)
+        // Worker is RUNNING → widget shows "Sync in process..." via WorkManager + same rules as Overview.
+        SyncWidgetProvider.requestUpdate(applicationContext)
 
         return try {
             runSyncPass(targetId)
@@ -62,15 +63,13 @@ class SyncWorker @AssistedInject constructor(
             diagnosticLogger.i(TAG, "Worker finished cancelled=${syncControl.isCancelled} stopped=$isStopped")
             val followUp = syncControl.endSession()
             // Coalesce mid-pass local changes into one follow-up instead of REPLACE mid-download.
-            // Paint "Syncing…" when a chained pass will start; otherwise a late requestUpdate from
-            // this worker races the next worker and the widget snaps back to OK while Overview is
-            // still "Sync in process...".
             if (followUp && !isStopped) {
                 syncScheduler.enqueueFollowUpIfNeeded(requested = true)
-                SyncWidgetProvider.showSyncing(applicationContext)
-            } else {
-                SyncWidgetProvider.requestUpdate(applicationContext)
             }
+            // forceIdle: WorkManager still marks this worker RUNNING until doWork returns, so a
+            // plain refresh would paint "Sync in process..." forever after ERROR while Overview
+            // already shows ERROR. Next worker start refreshes again if a follow-up runs.
+            SyncWidgetProvider.requestUpdate(applicationContext, forceIdle = true)
         }
     }
 

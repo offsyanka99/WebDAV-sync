@@ -9,19 +9,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Remove
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -30,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import org.vovchenko.webdavsync.ui.components.LabelWithInfoIcon
 import org.vovchenko.webdavsync.ui.components.ToggleRow
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -85,16 +86,19 @@ fun SynchronizationSettingsScreen(
                 label = "Wi-Fi only",
                 checked = settings.wifiOnly,
                 onCheckedChange = { viewModel.update { s -> s.copy(wifiOnly = it) } },
+                infoDescription = WIFI_ONLY_INFO,
             )
             ToggleRow(
                 label = "Warn before syncing on mobile data",
                 checked = settings.warnOnMobileNetwork,
                 onCheckedChange = { viewModel.update { s -> s.copy(warnOnMobileNetwork = it) } },
+                infoDescription = WARN_MOBILE_INFO,
             )
             ToggleRow(
                 label = "Allow parallel transfers",
                 checked = settings.allowParallelTransfers,
                 onCheckedChange = { viewModel.update { s -> s.copy(allowParallelTransfers = it) } },
+                infoDescription = PARALLEL_TRANSFERS_INFO,
             )
 
             HorizontalDivider()
@@ -132,6 +136,7 @@ fun SynchronizationSettingsScreen(
                 minValue = 0,
                 step = 1,
                 onValueChange = { viewModel.update { s -> s.copy(retryAttempts = it) } },
+                infoDescription = RETRY_ATTEMPTS_INFO,
             )
             Stepper(
                 label = "Retry wait (minutes)",
@@ -151,13 +156,20 @@ private fun Stepper(
     minValue: Int,
     step: Int,
     onValueChange: (Int) -> Unit,
+    infoDescription: String? = null,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, style = MaterialTheme.typography.bodyMedium)
+        LabelWithInfoIcon(
+            label = label,
+            infoDescription = infoDescription,
+            modifier = Modifier
+                .weight(1f)
+                .padding(end = 8.dp),
+        )
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = { onValueChange((value - step).coerceAtLeast(minValue)) }) {
                 Icon(imageVector = Icons.Filled.Remove, contentDescription = "Decrease")
@@ -169,3 +181,25 @@ private fun Stepper(
         }
     }
 }
+
+private const val WIFI_ONLY_INFO =
+    "When enabled, sync runs only on unmetered networks (typically Wi‑Fi). " +
+        "Manual, scheduled, and follow-up syncs wait until Wi‑Fi is available. " +
+        "This is the reliable way to avoid using mobile data for background transfers."
+
+private const val WARN_MOBILE_INFO =
+    "When enabled, starting sync manually (Overview or home-screen widget) while on " +
+        "cellular data shows a confirmation dialog first. " +
+        "Scheduled sync and “sync on local changes” do not show this warning — use " +
+        "“Wi‑Fi only” if you want those to avoid mobile data entirely."
+
+private const val PARALLEL_TRANSFERS_INFO =
+    "When enabled, several files can upload or download at the same time (up to 4), " +
+        "which is usually faster on a good connection. " +
+        "Turn off for slower or unstable networks, or if the server limits concurrent connections."
+
+private const val RETRY_ATTEMPTS_INFO =
+    "How many times to retry a single file transfer after a temporary failure " +
+        "(for example a connection timeout). " +
+        "Each retry waits the “Retry wait” interval. " +
+        "Set to 0 to try each file only once."

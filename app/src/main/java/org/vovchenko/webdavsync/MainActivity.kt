@@ -1,5 +1,6 @@
 package org.vovchenko.webdavsync
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -15,7 +16,12 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavController
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -26,6 +32,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.flow.MutableStateFlow
 import org.vovchenko.webdavsync.ui.accounts.AccountsScreen
 import org.vovchenko.webdavsync.ui.accounts.AddAccountScreen
 import org.vovchenko.webdavsync.ui.folders.FoldersScreen
@@ -46,20 +53,64 @@ private enum class BottomDestination(val route: String, val label: String) {
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+
+    /** When true, Overview runs [org.vovchenko.webdavsync.ui.overview.OverviewViewModel.requestSync] (widget + mobile warn). */
+    private val pendingSyncRequest = MutableStateFlow(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingSyncRequest.value = intent.consumeRequestSync()
         enableEdgeToEdge()
         setContent {
             WebDavSyncTheme {
-                WebDavSyncAppContent()
+                val pending by pendingSyncRequest.collectAsState()
+                WebDavSyncAppContent(
+                    pendingSyncRequest = pending,
+                    onPendingSyncConsumed = { pendingSyncRequest.value = false },
+                )
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.consumeRequestSync()) {
+            pendingSyncRequest.value = true
+        }
+    }
+
+    companion object {
+        /** Widget Sync while "warn on mobile data" is on — open Overview and run the same check. */
+        const val EXTRA_REQUEST_SYNC = "org.vovchenko.webdavsync.EXTRA_REQUEST_SYNC"
+    }
+}
+
+private fun Intent.consumeRequestSync(): Boolean {
+    if (!getBooleanExtra(MainActivity.EXTRA_REQUEST_SYNC, false)) return false
+    removeExtra(MainActivity.EXTRA_REQUEST_SYNC)
+    return true
 }
 
 @Composable
-private fun WebDavSyncAppContent() {
+private fun WebDavSyncAppContent(
+    pendingSyncRequest: Boolean = false,
+    onPendingSyncConsumed: () -> Unit = {},
+) {
     val navController = rememberNavController()
+    var triggerOverviewSync by remember { mutableStateOf(false) }
+
+    LaunchedEffect(pendingSyncRequest) {
+        if (pendingSyncRequest) {
+            navController.navigate(BottomDestination.Overview.route) {
+                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                launchSingleTop = true
+                restoreState = true
+            }
+            triggerOverviewSync = true
+            onPendingSyncConsumed()
+        }
+    }
 
     Scaffold(
         bottomBar = { WebDavSyncBottomBar(navController) },
@@ -70,7 +121,10 @@ private fun WebDavSyncAppContent() {
             modifier = Modifier.padding(innerPadding),
         ) {
             composable(BottomDestination.Overview.route) {
-                OverviewScreen()
+                OverviewScreen(
+                    requestSyncOnStart = triggerOverviewSync,
+                    onRequestSyncOnStartConsumed = { triggerOverviewSync = false },
+                )
             }
             composable(BottomDestination.Folders.route) {
                 FoldersScreen(

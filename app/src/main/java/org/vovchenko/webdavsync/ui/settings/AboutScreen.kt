@@ -29,6 +29,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import org.vovchenko.webdavsync.BuildConfig
 import org.vovchenko.webdavsync.R
+import org.vovchenko.webdavsync.ui.components.WebDavSyncTitle
 
 private const val CONTACT_EMAIL = "hummersoft@mailbox.org"
 
@@ -73,11 +74,9 @@ fun AboutScreen(
                 )
             }
 
-            Text(
-                text = "WebDAV-sync",
-                style = MaterialTheme.typography.headlineSmall,
-                textAlign = TextAlign.Center,
+            WebDavSyncTitle(
                 modifier = Modifier.padding(top = 24.dp),
+                textAlign = TextAlign.Center,
             )
             Text(
                 text = "Version ${BuildConfig.VERSION_NAME}",

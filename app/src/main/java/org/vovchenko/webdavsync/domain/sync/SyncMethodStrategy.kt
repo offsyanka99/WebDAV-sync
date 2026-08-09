@@ -44,6 +44,12 @@ private fun pickWinner(local: LocalFileEntry?, remote: RemoteFileEntry?): SyncAc
     return if (localMtime >= remoteMtime) SyncAction.Side.LOCAL else SyncAction.Side.REMOTE
 }
 
+/** True for paths we already minted as conflict copies — never nest another layer. */
+internal fun isConflictedCopyPath(relativePath: String): Boolean =
+    relativePath.substringAfterLast('/').contains(CONFLICTED_COPY_MARKER, ignoreCase = false)
+
+private const val CONFLICTED_COPY_MARKER = "(conflicted copy,"
+
 /**
  * Computes the file-level (non-directory) sync action for one relative path, per sync method
  * (plan Phase 4 "Strategy per sync method"). Directory create/delete is handled separately by
@@ -90,8 +96,44 @@ sealed interface SyncMethodStrategy {
                 // remote keeps the original Last-Modified, which falsely looked like a conflict and
                 // triggered upload + "conflicted copy" duplicates on the next pass.
                 local != null && remote != null && local.sizeBytes == remote.sizeBytes -> null
+                // Incomplete PUT/GET (timeout mid-body) leaves both sides present with different
+                // sizes and no matching baseline. Treat as repair, not a true dual-edit conflict —
+                // otherwise we nest "(conflicted copy)" names every pass (see diagnostic logs).
+                local != null && remote != null && shouldRepairIncompleteTransfer(
+                    relativePath, local, remote, baseline, lState, rState,
+                ) -> if (local.sizeBytes >= remote.sizeBytes) {
+                    SyncAction.UploadFile(relativePath, remotePath)
+                } else {
+                    SyncAction.DownloadFile(relativePath, remote.sizeBytes, remotePath)
+                }
                 else -> SyncAction.Conflict(relativePath, pickWinner(local, remote), remotePath)
             }
+        }
+
+        /**
+         * Incomplete transfer / cascade repair:
+         * - Already a conflicted-copy path → never nest another conflict; overwrite smaller side.
+         * - Both NEW (no baseline) with different sizes → almost always a partial PUT, not two
+         *   independent full creates of the same name.
+         */
+        private fun shouldRepairIncompleteTransfer(
+            relativePath: String,
+            local: LocalFileEntry,
+            remote: RemoteFileEntry,
+            baseline: SyncFileStateEntity?,
+            lState: ChangeState,
+            rState: ChangeState,
+        ): Boolean {
+            if (local.sizeBytes == remote.sizeBytes) return false
+            if (isConflictedCopyPath(relativePath)) return true
+            if (baseline == null && lState == ChangeState.NEW && rState == ChangeState.NEW) return true
+            // Baseline matches the larger side → smaller side is a truncated residual.
+            if (baseline != null) {
+                val larger = maxOf(local.sizeBytes, remote.sizeBytes)
+                val smaller = minOf(local.sizeBytes, remote.sizeBytes)
+                if (baseline.lastSyncedSize == larger && smaller < larger) return true
+            }
+            return false
         }
     }
 

@@ -82,6 +82,42 @@ class SyncMethodStrategyTest {
     }
 
     @Test
+    fun `two-way both new with different sizes repairs incomplete put by uploading larger local`() {
+        // Timed-out PUT leaves a partial remote; must not mint a conflicted copy.
+        // Helpers hardcode relativePath "file.txt" — keep the action path consistent.
+        val action = twoWay.computeFileAction("file.txt", local(4_000_000, 9000), remote(900_000, 8000), null)
+        assertEquals(SyncAction.UploadFile("file.txt"), action)
+    }
+
+    @Test
+    fun `two-way both new with larger remote repairs incomplete local by downloading`() {
+        val action = twoWay.computeFileAction("file.txt", local(500_000, 9000), remote(4_000_000, 8000), null)
+        assertEquals(SyncAction.DownloadFile("file.txt", remoteSizeBytes = 4_000_000), action)
+    }
+
+    @Test
+    fun `two-way never nests conflict on existing conflicted-copy path`() {
+        val path = "file (conflicted copy, device, 2026-08-09).apk"
+        fun localAt(size: Long, mtime: Long) =
+            LocalFileEntry(path, isDirectory = false, sizeBytes = size, lastModifiedEpochMillis = mtime)
+        fun remoteAt(size: Long, mtime: Long) =
+            RemoteFileEntry(path, isDirectory = false, sizeBytes = size, lastModifiedEpochMillis = mtime, etag = null)
+        val base = SyncFileStateEntity(
+            folderPairId = 1,
+            relativePath = path,
+            lastSyncedMtime = 1000,
+            lastSyncedSize = 4_000_000,
+        )
+        val action = twoWay.computeFileAction(
+            path,
+            localAt(4_000_000, 9000),
+            remoteAt(900_000, 8000),
+            base,
+        )
+        assertEquals(SyncAction.UploadFile(path), action)
+    }
+
+    @Test
     fun `to-device ignores local-only files`() {
         val action = toDevice.computeFileAction("file.txt", local(100, 1000), null, null)
         assertNull(action)

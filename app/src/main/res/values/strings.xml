@@ -23,7 +23,8 @@
     <string name="widget_status_ok">OK</string>
     <string name="widget_status_error">ERROR</string>
     <string name="widget_status_cancelled">CANCELLED</string>
-    <string name="widget_status_syncing">Syncing…</string>
+    <!-- Kept for layout defaults; live widget text comes from SyncStatusDisplay (same as Overview). -->
+    <string name="widget_status_syncing">Sync in process...</string>
     <string name="widget_last_sync_none">Last sync: —</string>
     <string name="widget_last_sync">Last sync: %1$s · %2$s</string>
     <string name="widget_changes_title">Recent changes</string>

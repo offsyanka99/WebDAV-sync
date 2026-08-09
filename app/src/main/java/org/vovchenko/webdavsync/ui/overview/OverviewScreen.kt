@@ -14,15 +14,18 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import org.vovchenko.webdavsync.domain.sync.SyncStatusDisplay
 import org.vovchenko.webdavsync.ui.components.Formatters
 import org.vovchenko.webdavsync.ui.components.LabeledRow
 import org.vovchenko.webdavsync.ui.components.SectionCard
+import org.vovchenko.webdavsync.ui.components.WebDavSyncTitle
 import org.vovchenko.webdavsync.ui.theme.StatusError
 import org.vovchenko.webdavsync.ui.theme.StatusOk
 import org.vovchenko.webdavsync.ui.theme.StatusWarn
@@ -32,15 +35,25 @@ import org.vovchenko.webdavsync.ui.theme.StatusWarn
 fun OverviewScreen(
     modifier: Modifier = Modifier,
     viewModel: OverviewViewModel = hiltViewModel(),
+    /** Set when the widget opens the app for a Sync that needs the mobile-data warning. */
+    requestSyncOnStart: Boolean = false,
+    onRequestSyncOnStartConsumed: () -> Unit = {},
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val showMobileWarning by viewModel.showMobileDataWarning.collectAsState()
+
+    LaunchedEffect(requestSyncOnStart) {
+        if (requestSyncOnStart) {
+            viewModel.requestSync()
+            onRequestSyncOnStartConsumed()
+        }
+    }
 
     Scaffold(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text("WebDAV-Sync") },
+                title = { WebDavSyncTitle() },
             )
         },
         bottomBar = {
@@ -121,14 +134,12 @@ fun OverviewScreen(
     }
 }
 
-/** OK / Ready → green, in process → yellow, ERROR → red (CANCELLED → yellow). */
-private fun statusColor(state: OverviewUiState): Color {
-    if (state.syncing) return StatusWarn
-    return when (state.lastSyncStatus?.uppercase()) {
-        "OK" -> StatusOk
-        "ERROR" -> StatusError
-        "CANCELLED" -> StatusWarn
-        null -> StatusOk // Ready
-        else -> Color.Unspecified
+/** Same kind → color mapping as the home-screen widget. */
+private fun statusColor(state: OverviewUiState): Color =
+    when (SyncStatusDisplay.resolve(state.lastSyncStatus, state.syncing).kind) {
+        SyncStatusDisplay.Kind.SYNCING -> StatusWarn
+        SyncStatusDisplay.Kind.OK, SyncStatusDisplay.Kind.READY -> StatusOk
+        SyncStatusDisplay.Kind.ERROR -> StatusError
+        SyncStatusDisplay.Kind.CANCELLED -> StatusWarn
+        SyncStatusDisplay.Kind.OTHER -> Color.Unspecified
     }
-}

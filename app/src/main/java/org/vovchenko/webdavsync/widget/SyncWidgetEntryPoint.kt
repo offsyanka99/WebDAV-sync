@@ -4,6 +4,7 @@ import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
+import org.vovchenko.webdavsync.data.repository.SettingsRepository
 import org.vovchenko.webdavsync.data.repository.SyncLogRepository
 import org.vovchenko.webdavsync.sync.worker.SyncScheduler
 
@@ -12,5 +13,6 @@ import org.vovchenko.webdavsync.sync.worker.SyncScheduler
 interface SyncWidgetEntryPoint {
     fun folderPairRepository(): FolderPairRepository
     fun syncLogRepository(): SyncLogRepository
+    fun settingsRepository(): SettingsRepository
     fun syncScheduler(): SyncScheduler
 }

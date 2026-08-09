@@ -2,7 +2,7 @@
 
 Android app that keeps local folders and WebDAV remote folders in sync — manually, on a schedule, or when files change.
 
-**Current release:** [v1.0.17](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.0.17)  
+**Current release:** [v1.0.19](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.0.19)  
 **Min Android:** 8.0 (API 26)  
 **License:** [MIT](LICENSE)
 
@@ -104,6 +104,16 @@ Core flow: scan local + remote → diff against last-sync baseline → transfer/
 - **Issues:** [GitHub Issues](https://github.com/offsyanka99/WebDAV-sync/issues)
 
 ## Changelog (recent)
+
+### v1.0.19
+
+- **Stop nested “(conflicted copy)” cascade** — timed-out uploads no longer leave partial remotes that the next pass treats as new conflicts; incomplete PUT/GET is repaired by re-uploading/downloading the larger side; conflicted-copy paths never nest another layer; conflict copies upload in the same pass when possible
+- **No transfer body timeouts** — OkHttp read/write timeouts removed so multi‑MB files can finish on mobile without mid-body abort
+- **Failed upload cleanup** — truncated remote objects smaller than the local source are deleted so the next pass retries a clean PUT
+- **Overview and widget Status stay in sync** — shared `SyncStatusDisplay` (same labels: OK / ERROR / “Sync in process…” / Ready); widget no longer freezes on sticky “Syncing…” after ERROR
+- **Mobile-data warning works with VPN** — cellular detection checks all networks (not only the active VPN interface); widget Sync opens Overview for the same confirm dialog
+- **Manual-only mobile warning** documented in-app via **(i)** info popups (Wi‑Fi only, warn on mobile, parallel transfers, retry attempts)
+- **UI polish** — Overview/About product title `Web` + gray `DAV` + `-Sync` at 26sp; info icons gray and inline at the end of multi-line labels
 
 ### v1.0.17
 

@@ -22,8 +22,8 @@ android {
         applicationId = "org.vovchenko.webdavsync"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "1.0.17"
+        versionCode = 10
+        versionName = "1.0.19"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

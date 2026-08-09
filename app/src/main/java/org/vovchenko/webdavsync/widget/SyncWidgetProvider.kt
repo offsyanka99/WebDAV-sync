@@ -12,10 +12,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import org.vovchenko.webdavsync.MainActivity
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
 import org.vovchenko.webdavsync.data.repository.SyncLogRepository
 import org.vovchenko.webdavsync.domain.sync.RecentChangesCalculator
 import org.vovchenko.webdavsync.sync.worker.SyncWorker
+import org.vovchenko.webdavsync.util.NetworkStatus
 
 /**
  * 4×2 home-screen widget: last sync status, recent change counts, and a Sync button.
@@ -42,10 +44,20 @@ class SyncWidgetProvider : AppWidgetProvider() {
             val pending = goAsync()
             CoroutineScope(Dispatchers.IO).launch {
                 try {
-                    // Immediate feedback on the widget.
-                    pushState(context, loadState(context).copy(syncing = true, status = "Syncing…"))
                     val entry = entryPoint(context)
+                    val settings = entry.settingsRepository().settings.first()
+                    // Widget cannot host the Compose dialog — open Overview so the same warning runs.
+                    if (settings.warnOnMobileNetwork && NetworkStatus.isOnCellularData(context)) {
+                        val open = Intent(context, MainActivity::class.java).apply {
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                            putExtra(MainActivity.EXTRA_REQUEST_SYNC, true)
+                        }
+                        context.startActivity(open)
+                        return@launch
+                    }
                     entry.syncScheduler().enqueueImmediateSync()
+                    // Paint from DB + WorkManager only — never force "Syncing…" that can outlive the worker.
+                    refreshNow(context)
                 } finally {
                     pending.finish()
                 }
@@ -58,34 +70,34 @@ class SyncWidgetProvider : AppWidgetProvider() {
     companion object {
         const val ACTION_SYNC_NOW = "org.vovchenko.webdavsync.widget.ACTION_SYNC_NOW"
 
-        /** Refresh every placed instance from the database (call after a sync pass completes). */
-        fun requestUpdate(context: Context) {
-            val appContext = context.applicationContext
-            val manager = AppWidgetManager.getInstance(appContext)
-            val ids = manager.getAppWidgetIds(ComponentName(appContext, SyncWidgetProvider::class.java))
-            if (ids.isEmpty()) return
-            val intent = Intent(appContext, SyncWidgetProvider::class.java).apply {
-                action = AppWidgetManager.ACTION_APPWIDGET_UPDATE
-                putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, ids)
+        /**
+         * Refresh every placed instance from DB + whether a worker is RUNNING.
+         * Same rules as Overview — do not force a sticky "Syncing…" paint.
+         *
+         * @param forceIdle When true (worker `finally`), paint as not syncing even if WorkManager
+         * still reports this worker RUNNING for a moment. Otherwise the widget freezes on
+         * "Sync in process..." while Overview already flipped to ERROR/OK after the pass wrote DB.
+         * The next worker's start calls [requestUpdate] again and shows syncing if needed.
+         */
+        fun requestUpdate(context: Context, forceIdle: Boolean = false) {
+            CoroutineScope(Dispatchers.IO).launch {
+                runCatching { refreshNow(context, forceIdle = forceIdle) }
             }
-            appContext.sendBroadcast(intent)
         }
 
-        /** Immediate “Syncing…” paint without waiting for WorkManager / DB. */
-        fun showSyncing(context: Context) {
-            CoroutineScope(Dispatchers.IO).launch {
-                runCatching {
-                    pushState(context, loadState(context).copy(syncing = true, status = "Syncing…"))
-                }
-            }
+        /** @see requestUpdate */
+        fun showSyncing(context: Context) = requestUpdate(context, forceIdle = false)
+
+        private suspend fun refreshNow(context: Context, forceIdle: Boolean = false) {
+            pushState(context, loadState(context, forceIdle = forceIdle))
         }
 
         private fun entryPoint(context: Context): SyncWidgetEntryPoint =
             EntryPointAccessors.fromApplication(context.applicationContext, SyncWidgetEntryPoint::class.java)
 
-        private suspend fun loadState(context: Context): SyncWidgetState {
+        private suspend fun loadState(context: Context, forceIdle: Boolean = false): SyncWidgetState {
             val entry = entryPoint(context)
-            val syncing = isSyncWorkerRunning(context)
+            val syncing = if (forceIdle) false else isSyncWorkerRunning(context)
             return loadState(entry.folderPairRepository(), entry.syncLogRepository(), syncing = syncing)
         }
 
