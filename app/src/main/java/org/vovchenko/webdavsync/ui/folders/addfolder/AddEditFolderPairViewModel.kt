@@ -140,7 +140,17 @@ class AddEditFolderPairViewModel @Inject constructor(
                 enabled = state.enabled,
             )
             if (folderPairId != null) {
-                folderPairRepository.update(entity)
+                val existing = folderPairRepository.observeById(folderPairId).first()
+                val sameLocal = existing?.localFolderUri == entity.localFolderUri
+                val sameRemote = existing?.remoteFolderPath == entity.remoteFolderPath
+                folderPairRepository.update(
+                    entity.copy(
+                        lastSyncAt = existing?.lastSyncAt,
+                        lastSyncDurationMs = existing?.lastSyncDurationMs,
+                        lastSyncStatus = if (sameRemote) existing?.lastSyncStatus else null,
+                        lastLocalFingerprint = if (sameLocal) existing?.lastLocalFingerprint else null,
+                    ),
+                )
             } else {
                 folderPairRepository.add(entity)
             }

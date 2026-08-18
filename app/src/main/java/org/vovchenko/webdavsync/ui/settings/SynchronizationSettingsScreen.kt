@@ -11,6 +11,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -99,17 +100,39 @@ fun SynchronizationSettingsScreen(
                     step = 15,
                     onValueChange = { viewModel.update { s -> s.copy(autoSyncIntervalMinutes = it) } },
                 )
-                ToggleRow(
+                SettingToggleRow(
                     label = "Sync immediately on local changes",
                     checked = settings.syncImmediatelyOnLocalChange,
                     onCheckedChange = { viewModel.update { s -> s.copy(syncImmediatelyOnLocalChange = it) } },
+                    help = IMMEDIATE_LOCAL_INFO,
+                    helpStyle = SettingHelpStyle.InlineInfo,
                 )
                 ToggleRow(
                     label = "Only while charging",
                     checked = settings.onlyWhileCharging,
                     onCheckedChange = { viewModel.update { s -> s.copy(onlyWhileCharging = it) } },
                 )
+                SettingToggleRow(
+                    label = "Sync even when battery is low",
+                    checked = settings.syncEvenWhenBatteryLow,
+                    onCheckedChange = { viewModel.update { s -> s.copy(syncEvenWhenBatteryLow = it) } },
+                    help = BATTERY_LOW_INFO,
+                    helpStyle = SettingHelpStyle.InlineInfo,
+                )
             }
+
+            FilledTonalButton(
+                onClick = { viewModel.update { s -> s.applyBatterySaverProfile() } },
+                enabled = !settings.isBatterySaverProfile(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Use battery saver profile")
+            }
+            Text(
+                text = BATTERY_SAVER_INFO,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
             HorizontalDivider()
 
@@ -186,3 +209,18 @@ private const val RETRY_ATTEMPTS_INFO =
         "(for example a connection timeout). " +
         "Each retry waits the “Retry wait” interval. " +
         "Set to 0 to try each file only once."
+
+private const val IMMEDIATE_LOCAL_INFO =
+    "When enabled, local file changes start a sync after a short delay instead of waiting " +
+        "for the interval. That uses more battery (folder watch + extra transfers). " +
+        "Leave this off to save energy; scheduled auto-sync still catches up. " +
+        "A folder pair’s own Instant upload checkbox can still trigger this for that pair."
+
+private const val BATTERY_LOW_INFO =
+    "When off (recommended), scheduled background sync waits until the battery is not low. " +
+        "Manual Sync from Overview or the widget still runs. " +
+        "Turn on only if you need hourly catch-up on a nearly empty battery."
+
+private const val BATTERY_SAVER_INFO =
+    "Sets Wi‑Fi only, only while charging, 3-hour interval, and turns off sync-on-local-change. " +
+        "A folder pair’s Instant upload checkbox is unchanged."

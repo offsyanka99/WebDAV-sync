@@ -3,24 +3,26 @@ package org.vovchenko.webdavsync.data.local.saf
 import android.content.ContentResolver
 import android.database.ContentObserver
 import android.net.Uri
-import android.os.Handler
-import android.os.Looper
 import android.provider.DocumentsContract
 
 /**
  * Watches a SAF folder tree for changes via [ContentResolver.registerContentObserver] (recursive),
  * feeding "instant upload" / "immediately on local changes" (plan §4.3).
+ *
+ * Callbacks are delivered on the provider's thread (no main-looper [android.os.Handler]) so the
+ * coordinator can hop to its own dispatcher without janking the UI.
  */
 class FolderChangeObserver(
     private val contentResolver: ContentResolver,
-    private val treeUri: Uri,
+    val treeUri: Uri,
     private val onChange: () -> Unit,
 ) {
     private var observer: ContentObserver? = null
     private var childrenUri: Uri? = null
 
     fun start() {
-        val obs = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        // Null handler: dispatchChange calls onChange on the notifyChange thread, not the main looper.
+        val obs = object : ContentObserver(null) {
             override fun onChange(selfChange: Boolean) {
                 onChange()
             }

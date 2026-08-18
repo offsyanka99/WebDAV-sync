@@ -1,6 +1,8 @@
 package org.vovchenko.webdavsync.sync.worker
 
 import android.content.Context
+import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.work.Constraints
 import androidx.work.Data
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -13,6 +15,7 @@ import androidx.work.WorkManager
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import org.vovchenko.webdavsync.data.local.FolderPairEntity
 import org.vovchenko.webdavsync.data.local.diagnostics.DiagnosticLogger
 import org.vovchenko.webdavsync.data.local.settings.AppSettings
 import org.vovchenko.webdavsync.data.repository.SettingsRepository
@@ -40,8 +43,14 @@ class SyncScheduler @Inject constructor(
         }
 
         val intervalMinutes = settings.autoSyncIntervalMinutes.coerceAtLeast(MIN_INTERVAL_MINUTES)
-        val request = PeriodicWorkRequestBuilder<SyncWorker>(intervalMinutes.toLong(), TimeUnit.MINUTES)
-            .setConstraints(buildConstraints(settings))
+        val flexMinutes = flexIntervalMinutes(intervalMinutes)
+        val request = PeriodicWorkRequestBuilder<SyncWorker>(
+            intervalMinutes.toLong(),
+            TimeUnit.MINUTES,
+            flexMinutes,
+            TimeUnit.MINUTES,
+        )
+            .setConstraints(buildConstraints(settings, requireBatteryNotLow = !settings.syncEvenWhenBatteryLow))
             .build()
 
         workManager.enqueueUniquePeriodicWork(
@@ -102,6 +111,57 @@ class SyncScheduler @Inject constructor(
         )
     }
 
+    /**
+     * Durable instant-upload wakeup: one-time WorkManager jobs with content-URI triggers.
+     * Periodic work cannot use content-URI triggers; each fire is consumed, so the watch is
+     * re-armed by [ContentWatchWorker] via [ExistingWorkPolicy.APPEND].
+     */
+    fun reconcileContentWatches(toWatch: Map<Long, FolderPairEntity>) {
+        cancelStaleContentWatches(toWatch.keys)
+        for (pair in toWatch.values) {
+            armContentWatch(pair, ExistingWorkPolicy.REPLACE)
+        }
+    }
+
+    fun cancelContentWatch(pairId: Long) {
+        workManager.cancelUniqueWork(contentWatchName(pairId))
+    }
+
+    /**
+     * Enqueues (or chains) a content-URI watch for [pair].
+     *
+     * Use [ExistingWorkPolicy.APPEND] from a running [ContentWatchWorker] so REPLACE does not
+     * cancel the worker that is still in [androidx.work.ListenableWorker.doWork].
+     */
+    fun armContentWatch(
+        pair: FolderPairEntity,
+        policy: ExistingWorkPolicy,
+    ) {
+        val treeUri = runCatching { Uri.parse(pair.localFolderUri) }.getOrNull() ?: return
+        if (treeUri.scheme != ContentResolverScheme) return
+
+        val request = OneTimeWorkRequestBuilder<ContentWatchWorker>()
+            .setInputData(Data.Builder().putLong(ContentWatchWorker.KEY_FOLDER_PAIR_ID, pair.id).build())
+            .setConstraints(buildContentWatchConstraints(treeUri))
+            .addTag(CONTENT_WATCH_TAG)
+            .build()
+
+        workManager.enqueueUniqueWork(contentWatchName(pair.id), policy, request)
+        diagnosticLogger.i(TAG, "Armed content-URI watch pairId=${pair.id} policy=$policy")
+    }
+
+    private fun cancelStaleContentWatches(keepIds: Set<Long>) {
+        val infos = runCatching { workManager.getWorkInfosByTag(CONTENT_WATCH_TAG).get() }
+            .getOrDefault(emptyList())
+        for (info in infos) {
+            if (info.state.isFinished) continue
+            val pairId = pairIdFromContentWatchTags(info.tags)
+            if (pairId == null || pairId !in keepIds) {
+                workManager.cancelWorkById(info.id)
+            }
+        }
+    }
+
     private fun hasActiveManualWork(): Boolean {
         val infos = workInfos(SyncWorker.UNIQUE_MANUAL_WORK_NAME)
         return infos.any {
@@ -146,16 +206,64 @@ class SyncScheduler @Inject constructor(
         inputData: Data = Data.EMPTY,
     ) = OneTimeWorkRequestBuilder<SyncWorker>()
         .setInputData(inputData)
-        .setConstraints(buildConstraints(settings))
+        // Manual / follow-up is user-initiated: do not block on battery-low (periodic still does).
+        .setConstraints(buildConstraints(settings, requireBatteryNotLow = false))
         .build()
 
-    private fun buildConstraints(settings: AppSettings): Constraints = Constraints.Builder()
-        .setRequiredNetworkType(if (settings.wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED)
-        .setRequiresCharging(settings.onlyWhileCharging)
-        .build()
+    /**
+     * Content-URI only — no network/charging here. The watch must fire while offline so we can
+     * re-arm it; [enqueueImmediateSync] still applies Wi‑Fi / charging constraints to the transfer.
+     */
+    private fun buildContentWatchConstraints(treeUri: Uri): Constraints {
+        val builder = Constraints.Builder()
+            .addContentUriTrigger(treeUri, /* triggerForDescendants = */ true)
+            .setTriggerContentUpdateDelay(CONTENT_TRIGGER_UPDATE_DELAY_SECONDS, TimeUnit.SECONDS)
+            .setTriggerContentMaxDelay(CONTENT_TRIGGER_MAX_DELAY_SECONDS, TimeUnit.SECONDS)
+        runCatching {
+            val docId = DocumentsContract.getTreeDocumentId(treeUri)
+            val children = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
+            builder.addContentUriTrigger(children, true)
+        }
+        return builder.build()
+    }
 
-    private companion object {
+    companion object {
         private const val TAG = "SyncScheduler"
         const val MIN_INTERVAL_MINUTES = 15 // androidx.work.PeriodicWorkRequest's enforced floor
+        const val CONTENT_WATCH_TAG = "content_watch"
+        private const val CONTENT_WATCH_NAME_PREFIX = "content_watch_"
+        private const val ContentResolverScheme = "content"
+        private const val CONTENT_TRIGGER_UPDATE_DELAY_SECONDS = 2L
+        private const val CONTENT_TRIGGER_MAX_DELAY_SECONDS = 30L
+        /** Floor for the flex window so JobScheduler can still batch (must stay < interval). */
+        private const val MIN_FLEX_MINUTES = 5
+
+        fun contentWatchName(pairId: Long): String = "$CONTENT_WATCH_NAME_PREFIX$pairId"
+
+        /**
+         * Flex window at the end of each period so Android can batch with other jobs.
+         * Always strictly less than [intervalMinutes].
+         */
+        fun flexIntervalMinutes(intervalMinutes: Int): Long {
+            val interval = intervalMinutes.coerceAtLeast(MIN_INTERVAL_MINUTES)
+            val flex = (interval / 4).coerceAtLeast(MIN_FLEX_MINUTES)
+            return flex.coerceAtMost(interval - 1).toLong()
+        }
+
+        fun buildConstraints(settings: AppSettings, requireBatteryNotLow: Boolean): Constraints =
+            Constraints.Builder()
+                .setRequiredNetworkType(if (settings.wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED)
+                .setRequiresCharging(settings.onlyWhileCharging)
+                .setRequiresBatteryNotLow(requireBatteryNotLow)
+                .build()
+
+        internal fun pairIdFromContentWatchTags(tags: Set<String>): Long? =
+            tags.firstNotNullOfOrNull { tag ->
+                if (tag.startsWith(CONTENT_WATCH_NAME_PREFIX) && tag != CONTENT_WATCH_TAG) {
+                    tag.removePrefix(CONTENT_WATCH_NAME_PREFIX).toLongOrNull()
+                } else {
+                    null
+                }
+            }
     }
 }

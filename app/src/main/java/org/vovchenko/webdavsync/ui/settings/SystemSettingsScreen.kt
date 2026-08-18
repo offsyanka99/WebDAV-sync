@@ -101,7 +101,7 @@ fun SystemSettingsScreen(
         ) {
             SettingToggleRow(
                 label = "Battery optimization",
-                help = "When on, the app is exempt from battery optimization (Allow background usage / Unrestricted) so sync is less likely to be stopped. Android may open a system dialog or the App battery screen — confirm there, then return.",
+                help = "When on, the app is Unrestricted and Android is less likely to stop background work. That uses more battery. Only needed for reliable instant upload / sync-on-local-change. Scheduled auto-sync still runs without this (WorkManager). Android may open a system dialog or the App battery screen — confirm there, then return.",
                 helpStyle = SettingHelpStyle.CardBody,
                 checked = batteryExempt,
                 onCheckedChange = { wantExempt ->

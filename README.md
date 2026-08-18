@@ -2,7 +2,7 @@
 
 Android app that keeps local folders and WebDAV remote folders in sync — manually, on a schedule, or when files change.
 
-**Current release:** [v1.1.2](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.1.2)  
+**Current release:** [v1.1.3](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.1.3)  
 **Min Android:** 8.0 (API 26)  
 **License:** [MIT](LICENSE)
 
@@ -14,9 +14,10 @@ Android app that keeps local folders and WebDAV remote folders in sync — manua
   - **Two-way** — three-way baseline sync with conflict copies
   - **To the device** — remote → local only
   - **To the cloud** — local → remote only
-- **Background sync** via WorkManager (periodic + manual + boot reschedule)
-- **Instant upload** when local changes are detected (optional per pair), coalesced so it never interrupts an in-flight pass
-- **Foreground notification** with pause / resume / cancel during sync
+- **Background sync** via WorkManager (periodic + manual + boot reschedule), with a flex window and “battery not low” by default
+- **Instant upload** when local changes are detected (optional per pair), coalesced so it never interrupts an in-flight pass — off by default on new installs
+- **Battery saver profile** (Wi‑Fi only, charging only, 3-hour interval, no sync-on-local-change)
+- **Foreground notification** with pause / resume / cancel only while a pass is talking to the server
 - **Live Recent changes on Overview** while a pass is running (upload / download / delete counts, no DB write per file)
 - **Size limits** for upload and download
 - **Wi‑Fi only**, mobile-data warning, parallel transfers, retries
@@ -105,6 +106,15 @@ Core flow: scan local + remote → diff against last-sync baseline → transfer/
 - **Issues:** [GitHub Issues](https://github.com/offsyanka99/WebDAV-sync/issues)
 
 ## Changelog (recent)
+
+### v1.1.3
+
+- **Lower idle battery use** — local change detection no longer walks the whole SAF tree every 4 seconds. Instant upload uses ContentObserver + a WorkManager content-URI trigger, with a cheap 90s root query as fallback. Periodic sync remains the safety net.
+- **Safer new-install defaults** — “Sync immediately on local changes” is off; scheduled work waits until the battery is not low (manual Sync still runs). Periodic jobs use a flex window so Android can batch them. Existing saved settings are unchanged.
+- **Battery saver profile** on Synchronization settings: Wi‑Fi only, only while charging, 3-hour interval, instant-on off. Configuration copy explains that Unrestricted battery is only needed for instant upload.
+- **Idle “To the cloud” passes skip the network** — after a successful pass the local tree fingerprint is stored; if it is unchanged, the next to-cloud tick does not PROPFIND, MKCOL, or show a sync notification.
+- **Foreground service only when needed** — no persistent notification for an all-idle tick. Quota refresh and empty-folder cleanup are skipped or limited to folders that just lost files.
+- **Edit folder pair keeps Last sync** — saving a pair no longer wipes Last sync / Duration / Status (unless the local or remote path changed).
 
 ### v1.1.2
 

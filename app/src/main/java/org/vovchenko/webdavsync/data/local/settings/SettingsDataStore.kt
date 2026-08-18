@@ -40,6 +40,7 @@ class SettingsDataStore @Inject constructor(
         val autoSyncIntervalMinutes = intPreferencesKey("auto_sync_interval_minutes")
         val syncImmediatelyOnLocalChange = booleanPreferencesKey("sync_immediately_on_local_change")
         val onlyWhileCharging = booleanPreferencesKey("only_while_charging")
+        val syncEvenWhenBatteryLow = booleanPreferencesKey("sync_even_when_battery_low")
         val retryAttempts = intPreferencesKey("retry_attempts")
         val retryWaitMinutes = intPreferencesKey("retry_wait_minutes")
         val batteryOptimizationDisabled = booleanPreferencesKey("battery_optimization_disabled")
@@ -60,6 +61,7 @@ class SettingsDataStore @Inject constructor(
             syncImmediatelyOnLocalChange = this[Keys.syncImmediatelyOnLocalChange]
                 ?: defaults.syncImmediatelyOnLocalChange,
             onlyWhileCharging = this[Keys.onlyWhileCharging] ?: defaults.onlyWhileCharging,
+            syncEvenWhenBatteryLow = this[Keys.syncEvenWhenBatteryLow] ?: defaults.syncEvenWhenBatteryLow,
             retryAttempts = this[Keys.retryAttempts] ?: defaults.retryAttempts,
             retryWaitMinutes = this[Keys.retryWaitMinutes] ?: defaults.retryWaitMinutes,
             batteryOptimizationDisabled = this[Keys.batteryOptimizationDisabled]
@@ -87,6 +89,7 @@ class SettingsDataStore @Inject constructor(
         this[Keys.autoSyncIntervalMinutes] = settings.autoSyncIntervalMinutes
         this[Keys.syncImmediatelyOnLocalChange] = settings.syncImmediatelyOnLocalChange
         this[Keys.onlyWhileCharging] = settings.onlyWhileCharging
+        this[Keys.syncEvenWhenBatteryLow] = settings.syncEvenWhenBatteryLow
         this[Keys.retryAttempts] = settings.retryAttempts
         this[Keys.retryWaitMinutes] = settings.retryWaitMinutes
         this[Keys.batteryOptimizationDisabled] = settings.batteryOptimizationDisabled

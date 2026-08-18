@@ -6,6 +6,7 @@ import android.os.SystemClock
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
@@ -14,7 +15,8 @@ import org.vovchenko.webdavsync.data.local.FolderPairEntity
 import org.vovchenko.webdavsync.data.local.diagnostics.DiagnosticLogger
 import org.vovchenko.webdavsync.data.local.saf.FolderChangeDebouncer
 import org.vovchenko.webdavsync.data.local.saf.FolderChangeObserver
-import org.vovchenko.webdavsync.data.local.saf.LocalTreeScanner
+import org.vovchenko.webdavsync.data.local.saf.LocalTreeFingerprint
+import org.vovchenko.webdavsync.data.local.settings.AppSettings
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
 import org.vovchenko.webdavsync.data.repository.SettingsRepository
 import org.vovchenko.webdavsync.sync.control.SyncControl
@@ -26,8 +28,15 @@ import javax.inject.Singleton
 /**
  * Triggers sync on local folder changes for Instant upload / "immediately on local changes".
  *
- * SAF [ContentObserver] alone is unreliable on many devices/providers, so we also **poll** a
- * lightweight local fingerprint (entry count + total size + max mtime) every few seconds.
+ * Detection layers (cheapest first):
+ * 1. SAF [ContentObserver] while this process is alive (event-driven).
+ * 2. WorkManager content-URI trigger ([org.vovchenko.webdavsync.sync.worker.ContentWatchWorker])
+ *    so a change can wake the app after process death.
+ * 3. A slow **non-recursive** fingerprint poll as a fallback for providers that never notify.
+ * 4. Periodic [org.vovchenko.webdavsync.sync.worker.SyncWorker] as the durable safety net.
+ *
+ * The poller must not walk the whole tree. Nested edits that miss the cheap fingerprint are
+ * picked up by the observer, the content-URI job, or the next periodic pass.
  *
  * While a [SyncControl] session is active, fingerprint changes are absorbed (downloads write local
  * files) and at most one follow-up sync is requested — never a mid-transfer REPLACE.
@@ -40,7 +49,7 @@ class FolderChangeCoordinator @Inject constructor(
     private val debouncer: FolderChangeDebouncer,
     private val syncScheduler: SyncScheduler,
     private val syncControl: SyncControl,
-    private val localTreeScanner: LocalTreeScanner,
+    private val treeFingerprint: LocalTreeFingerprint,
     private val diagnosticLogger: DiagnosticLogger,
     private val scope: CoroutineScope,
 ) {
@@ -50,29 +59,19 @@ class FolderChangeCoordinator @Inject constructor(
     private var pollJob: Job? = null
     @Volatile private var watchedPairs: Map<Long, FolderPairEntity> = emptyMap()
 
-    fun start() {
+    fun start(
+        pairs: Flow<List<FolderPairEntity>> = folderPairRepository.observeAll(),
+        settings: Flow<AppSettings> = settingsRepository.settings,
+    ) {
         scope.launch {
-            combine(
-                folderPairRepository.observeAll(),
-                settingsRepository.settings,
-            ) { pairs, settings ->
-                pairs.filter { pair ->
-                    pair.enabled && (
-                        pair.instantUpload ||
-                            (settings.autoSyncEnabled && settings.syncImmediatelyOnLocalChange)
-                        )
-                }.associateBy { it.id }
+            combine(pairs, settings) { folderPairs, appSettings ->
+                folderPairs.filter { InstantWatchPolicy.shouldWatch(it, appSettings) }.associateBy { it.id }
             }
-                .distinctUntilChanged { a, b ->
-                    a.keys == b.keys && a.all { (id, p) ->
-                        b[id]?.localFolderUri == p.localFolderUri &&
-                            b[id]?.instantUpload == p.instantUpload &&
-                            b[id]?.enabled == p.enabled
-                    }
-                }
+                .distinctUntilChanged { a, b -> sameWatchSurface(a, b) }
                 .collect { toWatch ->
                     watchedPairs = toWatch
                     reconcileObservers(toWatch)
+                    syncScheduler.reconcileContentWatches(toWatch)
                     ensurePoller(toWatch.isNotEmpty())
                 }
         }
@@ -81,31 +80,39 @@ class FolderChangeCoordinator @Inject constructor(
     private fun reconcileObservers(toWatch: Map<Long, FolderPairEntity>) {
         val stale = observers.keys - toWatch.keys
         stale.forEach { id ->
-            observers.remove(id)?.stop()
-            debouncer.cancel(id)
-            fingerprints.remove(id)
+            stopWatch(id)
             diagnosticLogger.i(TAG, "Stopped folder watch pairId=$id")
         }
         for ((id, pair) in toWatch) {
-            if (observers.containsKey(id)) continue
             val uri = runCatching { Uri.parse(pair.localFolderUri) }.getOrNull() ?: continue
+            val existing = observers[id]
+            if (existing != null && existing.treeUri == uri) continue
+            existing?.let {
+                it.stop()
+                observers.remove(id)
+            }
             val observer = FolderChangeObserver(
                 contentResolver = context.contentResolver,
                 treeUri = uri,
-                onChange = { scheduleSync(id, "content-observer") },
+                onChange = { onLocalChange(id, "content-observer") },
             )
             runCatching { observer.start() }
                 .onSuccess {
                     observers[id] = observer
-                    // Seed fingerprint so the first poll does not false-trigger.
                     fingerprints[id] = fingerprint(pair)
-                    diagnosticLogger.i(TAG, "Started folder watch pairId=$id (observer+poll)")
+                    diagnosticLogger.i(TAG, "Started folder watch pairId=$id (observer+content-uri+cheap-poll)")
                 }
                 .onFailure {
-                    diagnosticLogger.w(TAG, "ContentObserver failed pairId=$id, relying on poll: ${it.message}")
+                    diagnosticLogger.w(TAG, "ContentObserver failed pairId=$id, relying on content-uri+poll: ${it.message}")
                     fingerprints[id] = fingerprint(pair)
                 }
         }
+    }
+
+    private fun stopWatch(id: Long) {
+        observers.remove(id)?.stop()
+        debouncer.cancel(id)
+        fingerprints.remove(id)
     }
 
     private fun ensurePoller(needed: Boolean) {
@@ -116,19 +123,18 @@ class FolderChangeCoordinator @Inject constructor(
         }
         if (pollJob?.isActive == true) return
         pollJob = scope.launch {
-            diagnosticLogger.i(TAG, "Local folder poller started intervalMs=$POLL_MS")
+            diagnosticLogger.i(TAG, "Local folder cheap poller started intervalMs=$CHEAP_POLL_MS")
             while (isActive) {
-                delay(POLL_MS)
+                delay(CHEAP_POLL_MS)
                 val snapshot = watchedPairs
                 for ((id, pair) in snapshot) {
                     val fp = fingerprint(pair)
                     val previous = fingerprints.put(id, fp)
                     if (previous != null && previous != fp) {
-                        // Growing/shrinking tree while we download is expected — do not log spam.
                         if (syncControl.isSessionActive) {
                             syncControl.requestFollowUpSync()
                         } else {
-                            scheduleSync(id, "poll fingerprint change $previous→$fp")
+                            scheduleSync(id, "cheap-poll fingerprint change $previous→$fp")
                         }
                     }
                 }
@@ -136,7 +142,12 @@ class FolderChangeCoordinator @Inject constructor(
         }
     }
 
-    private fun scheduleSync(folderPairId: Long, reason: String) {
+    /** Hop off the ContentObserver thread before any fingerprint or WorkManager work. */
+    private fun onLocalChange(folderPairId: Long, reason: String) {
+        scope.launch { scheduleSync(folderPairId, reason) }
+    }
+
+    private suspend fun scheduleSync(folderPairId: Long, reason: String) {
         // Downloads/uploads rewrite the local tree; never start a competing worker mid-pass.
         if (syncControl.isSessionActive) {
             watchedPairs[folderPairId]?.let { fingerprints[folderPairId] = fingerprint(it) }
@@ -176,30 +187,27 @@ class FolderChangeCoordinator @Inject constructor(
         }
     }
 
-    /**
-     * Cheap stable hash of the local tree. Changes when files are added/removed/resized/touched.
-     */
-    private fun fingerprint(pair: FolderPairEntity): Long {
-        return runCatching {
-            val uri = Uri.parse(pair.localFolderUri)
-            val entries = localTreeScanner.scan(uri, pair.excludeHiddenFiles, pair.excludedSubfolders)
-            var count = 0
-            var totalSize = 0L
-            var maxMtime = 0L
-            for (e in entries) {
-                count++
-                totalSize += e.sizeBytes
-                if (e.lastModifiedEpochMillis > maxMtime) maxMtime = e.lastModifiedEpochMillis
-            }
-            // Pack into a single long (collisions acceptable; we only need change detection).
-            31L * count + 17L * totalSize + maxMtime
-        }.getOrDefault(0L)
+    private fun fingerprint(pair: FolderPairEntity): Long =
+        runCatching { treeFingerprint.of(Uri.parse(pair.localFolderUri)) }.getOrDefault(0L)
+
+    private fun sameWatchSurface(
+        a: Map<Long, FolderPairEntity>,
+        b: Map<Long, FolderPairEntity>,
+    ): Boolean {
+        if (a.keys != b.keys) return false
+        return a.all { (id, p) ->
+            val o = b[id] ?: return@all false
+            o.localFolderUri == p.localFolderUri &&
+                o.instantUpload == p.instantUpload &&
+                o.enabled == p.enabled
+        }
     }
 
-    private companion object {
+    companion object {
         const val TAG = "FolderChange"
         const val DEBOUNCE_MS = 2_000L
-        const val POLL_MS = 4_000L
+        /** Fallback only — not a full-tree walk. ContentObserver / content-URI are the fast path. */
+        const val CHEAP_POLL_MS = 90_000L
         const val COOLDOWN_MS = 15_000L
     }
 }

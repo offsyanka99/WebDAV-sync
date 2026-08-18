@@ -73,4 +73,20 @@ class FolderPairDaoTest {
 
         assertEquals(0, db.folderPairDao().getEnabled().size)
     }
+
+    @Test
+    fun `lastLocalFingerprint persists`() = runTest {
+        val accountId = insertAccount()
+        val id = db.folderPairDao().insert(
+            FolderPairEntity(
+                accountId = accountId,
+                name = "Photos",
+                remoteFolderPath = "/Photos",
+                localFolderUri = "content://tree/photos",
+                lastLocalFingerprint = 99L,
+            ),
+        )
+        val stored = db.folderPairDao().observeById(id).first()
+        assertEquals(99L, stored?.lastLocalFingerprint)
+    }
 }

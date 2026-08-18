@@ -54,11 +54,6 @@ class SyncWorker @AssistedInject constructor(
 
         syncProgress.beginPass()
         diagnosticLogger.i(TAG, "Worker start targetPairId=${targetId ?: "all"} runAttempt=$runAttemptCount")
-        setForeground(
-            notificationHelper.foregroundInfo(applicationContext.getString(R.string.sync_notification_starting)),
-        )
-        // Worker is RUNNING → widget shows "Sync in process..." via WorkManager + same rules as Overview.
-        SyncWidgetProvider.requestUpdate(applicationContext)
 
         return try {
             runSyncPass(targetId)
@@ -89,6 +84,7 @@ class SyncWorker @AssistedInject constructor(
         var hadErrors = false
         val accountIds = mutableSetOf<Long>()
         val syncedPairIds = mutableListOf<Long>()
+        var promotedForeground = false
         // Session totals for Overview / widget "Recent changes" (sum across every pair in this pass).
         var sessionUploaded = 0
         var sessionDownloaded = 0
@@ -103,20 +99,26 @@ class SyncWorker @AssistedInject constructor(
             syncControl.awaitWhilePaused { isStopped }
             if (shouldAbort()) break
 
-            setForeground(
-                notificationHelper.foregroundInfo(
-                    applicationContext.getString(R.string.sync_notification_syncing, pair.name),
-                    isPaused = syncControl.isPaused,
-                ),
-            )
-
-            val outcome = syncEngine.sync(pair.id)
-            accountIds += pair.accountId
+            val outcome = syncEngine.sync(pair.id) {
+                setForeground(
+                    notificationHelper.foregroundInfo(
+                        applicationContext.getString(R.string.sync_notification_syncing, pair.name),
+                        isPaused = syncControl.isPaused,
+                    ),
+                )
+                if (!promotedForeground) {
+                    promotedForeground = true
+                    SyncWidgetProvider.requestUpdate(applicationContext)
+                }
+            }
             syncedPairIds += pair.id
             sessionUploaded += outcome.uploaded
             sessionDownloaded += outcome.downloaded
             sessionDeletedLocal += outcome.deletedLocal
             sessionDeletedRemote += outcome.deletedRemote
+            if (!outcome.isIdleNoOp) {
+                accountIds += pair.accountId
+            }
             if (outcome.hasErrors && !syncControl.isCancelled) hadErrors = true
         }
 
@@ -146,12 +148,16 @@ class SyncWorker @AssistedInject constructor(
         // Avoid instant-upload poll treating post-sync local tree changes as a new user edit.
         folderChangeCoordinator.reseedAfterSync(syncedPairIds)
 
-        // Refresh cloud storage quotas shown on Overview after transfers complete.
-        for (accountId in accountIds) {
-            val account = accountRepository.observeById(accountId).first() ?: continue
-            connectionRepository.refreshQuota(account).onFailure {
-                diagnosticLogger.w(TAG, "Quota refresh failed accountId=$accountId: ${it.message}")
+        // Quota PROPFIND is wasted on an idle no-op (nothing transferred).
+        if (sessionHadWork) {
+            for (accountId in accountIds) {
+                val account = accountRepository.observeById(accountId).first() ?: continue
+                connectionRepository.refreshQuota(account).onFailure {
+                    diagnosticLogger.w(TAG, "Quota refresh failed accountId=$accountId: ${it.message}")
+                }
             }
+        } else {
+            diagnosticLogger.i(TAG, "Skip quota refresh (idle pass)")
         }
 
         // Do not Result.retry() on logical sync errors — that left WorkManager in ENQUEUED forever

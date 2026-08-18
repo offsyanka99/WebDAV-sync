@@ -166,6 +166,7 @@ private fun AppSettings.toJson(): JSONObject = JSONObject().apply {
     put("autoSyncIntervalMinutes", autoSyncIntervalMinutes)
     put("syncImmediatelyOnLocalChange", syncImmediatelyOnLocalChange)
     put("onlyWhileCharging", onlyWhileCharging)
+    put("syncEvenWhenBatteryLow", syncEvenWhenBatteryLow)
     put("retryAttempts", retryAttempts)
     put("retryWaitMinutes", retryWaitMinutes)
     put("batteryOptimizationDisabled", batteryOptimizationDisabled)
@@ -183,6 +184,7 @@ private fun JSONObject.toAppSettings(current: AppSettings): AppSettings = curren
     autoSyncIntervalMinutes = optInt("autoSyncIntervalMinutes", current.autoSyncIntervalMinutes),
     syncImmediatelyOnLocalChange = optBoolean("syncImmediatelyOnLocalChange", current.syncImmediatelyOnLocalChange),
     onlyWhileCharging = optBoolean("onlyWhileCharging", current.onlyWhileCharging),
+    syncEvenWhenBatteryLow = optBoolean("syncEvenWhenBatteryLow", current.syncEvenWhenBatteryLow),
     retryAttempts = optInt("retryAttempts", current.retryAttempts),
     retryWaitMinutes = optInt("retryWaitMinutes", current.retryWaitMinutes),
     batteryOptimizationDisabled = optBoolean("batteryOptimizationDisabled", current.batteryOptimizationDisabled),

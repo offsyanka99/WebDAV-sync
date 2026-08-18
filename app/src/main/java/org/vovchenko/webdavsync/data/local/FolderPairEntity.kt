@@ -35,4 +35,6 @@ data class FolderPairEntity(
     val lastSyncAt: Long? = null,
     val lastSyncDurationMs: Long? = null,
     val lastSyncStatus: String? = null,
+    /** Full local-tree fingerprint from the last successful scan; used to skip idle to-cloud passes. */
+    val lastLocalFingerprint: Long? = null,
 )
