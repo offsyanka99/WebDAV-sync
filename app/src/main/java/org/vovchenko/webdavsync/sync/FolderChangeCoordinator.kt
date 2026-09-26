@@ -56,6 +56,8 @@ class FolderChangeCoordinator @Inject constructor(
     private val observers = ConcurrentHashMap<Long, FolderChangeObserver>()
     private val fingerprints = ConcurrentHashMap<Long, Long>()
     private val lastTriggerAt = ConcurrentHashMap<Long, Long>()
+    /** Pairs whose in-process observer failed to register. The cheap poll covers only these. */
+    private val pollPairIds = java.util.concurrent.ConcurrentHashMap.newKeySet<Long>()
     private var pollJob: Job? = null
     @Volatile private var watchedPairs: Map<Long, FolderPairEntity> = emptyMap()
 
@@ -72,7 +74,6 @@ class FolderChangeCoordinator @Inject constructor(
                     watchedPairs = toWatch
                     reconcileObservers(toWatch)
                     syncScheduler.reconcileContentWatches(toWatch)
-                    ensurePoller(toWatch.isNotEmpty())
                 }
         }
     }
@@ -99,18 +100,22 @@ class FolderChangeCoordinator @Inject constructor(
             runCatching { observer.start() }
                 .onSuccess {
                     observers[id] = observer
+                    pollPairIds.remove(id)
                     fingerprints[id] = fingerprint(pair)
-                    diagnosticLogger.i(TAG, "Started folder watch pairId=$id (observer+content-uri+cheap-poll)")
+                    diagnosticLogger.i(TAG, "Started folder watch pairId=$id (observer+content-uri)")
                 }
                 .onFailure {
+                    pollPairIds.add(id)
                     diagnosticLogger.w(TAG, "ContentObserver failed pairId=$id, relying on content-uri+poll: ${it.message}")
                     fingerprints[id] = fingerprint(pair)
                 }
         }
+        ensurePoller(pollPairIds.isNotEmpty())
     }
 
     private fun stopWatch(id: Long) {
         observers.remove(id)?.stop()
+        pollPairIds.remove(id)
         debouncer.cancel(id)
         fingerprints.remove(id)
     }
@@ -126,13 +131,13 @@ class FolderChangeCoordinator @Inject constructor(
             diagnosticLogger.i(TAG, "Local folder cheap poller started intervalMs=$CHEAP_POLL_MS")
             while (isActive) {
                 delay(CHEAP_POLL_MS)
-                val snapshot = watchedPairs
-                for ((id, pair) in snapshot) {
+                for (id in pollPairIds.toList()) {
+                    val pair = watchedPairs[id] ?: continue
                     val fp = fingerprint(pair)
                     val previous = fingerprints.put(id, fp)
                     if (previous != null && previous != fp) {
                         if (syncControl.isSessionActive) {
-                            syncControl.requestFollowUpSync()
+                            syncControl.requestFollowUpSync(id)
                         } else {
                             scheduleSync(id, "cheap-poll fingerprint change $previous→$fp")
                         }
@@ -151,7 +156,7 @@ class FolderChangeCoordinator @Inject constructor(
         // Downloads/uploads rewrite the local tree; never start a competing worker mid-pass.
         if (syncControl.isSessionActive) {
             watchedPairs[folderPairId]?.let { fingerprints[folderPairId] = fingerprint(it) }
-            syncControl.requestFollowUpSync()
+            syncControl.requestFollowUpSync(folderPairId)
             diagnosticLogger.i(TAG, "Defer local change during active sync pairId=$folderPairId ($reason)")
             return
         }
@@ -167,7 +172,7 @@ class FolderChangeCoordinator @Inject constructor(
         debouncer.onChangeDetected(folderPairId, DEBOUNCE_MS) { id ->
             if (syncControl.isSessionActive) {
                 watchedPairs[id]?.let { fingerprints[id] = fingerprint(it) }
-                syncControl.requestFollowUpSync()
+                syncControl.requestFollowUpSync(id)
                 diagnosticLogger.i(TAG, "Defer debounced change during active sync pairId=$id ($reason)")
                 return@onChangeDetected
             }

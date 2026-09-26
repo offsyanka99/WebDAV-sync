@@ -59,13 +59,18 @@
             android:exported="false"
             android:enabled="true" />
 
+        <!-- Explicit PendingIntent only. The widget provider stays exported for APPWIDGET_UPDATE. -->
+        <receiver
+            android:name=".sync.worker.WidgetSyncReceiver"
+            android:exported="false"
+            android:enabled="true" />
+
         <receiver
             android:name=".widget.SyncWidgetProvider"
             android:exported="true"
             android:label="@string/widget_title">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-                <action android:name="org.vovchenko.webdavsync.widget.ACTION_SYNC_NOW" />
             </intent-filter>
             <meta-data
                 android:name="android.appwidget.provider"

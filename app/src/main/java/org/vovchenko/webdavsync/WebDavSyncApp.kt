@@ -30,7 +30,7 @@ class WebDavSyncApp : Application(), Configuration.Provider {
         super.onCreate()
         // Ensures periodic sync reflects current settings even if they were changed while the app was killed.
         CoroutineScope(Dispatchers.Default).launch {
-            syncScheduler.reschedulePeriodicSync()
+            syncScheduler.ensurePeriodicSyncPresent()
             diagnosticLogger.i("App", "Process start version=${BuildConfig.VERSION_NAME}")
         }
         folderChangeCoordinator.start()

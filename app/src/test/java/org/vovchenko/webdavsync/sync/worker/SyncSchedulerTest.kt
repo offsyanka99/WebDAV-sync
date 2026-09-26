@@ -1,10 +1,12 @@
 package org.vovchenko.webdavsync.sync.worker
 
+import android.app.job.JobScheduler
 import androidx.test.core.app.ApplicationProvider
 import androidx.work.ExistingWorkPolicy
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.testing.WorkManagerTestInitHelper
+import org.robolectric.shadows.ShadowLooper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.runTest
@@ -21,6 +23,7 @@ import org.vovchenko.webdavsync.data.local.diagnostics.DiagnosticLogger
 import org.vovchenko.webdavsync.data.local.settings.AppSettings
 import org.vovchenko.webdavsync.data.local.settings.SettingsDataStore
 import org.vovchenko.webdavsync.data.repository.SettingsRepository
+import org.vovchenko.webdavsync.data.remote.InFlightCallRegistry
 import org.vovchenko.webdavsync.sync.control.SyncControl
 
 /** Verifies WorkManager scheduling behavior driven by [AppSettings] (plan Phase 5/10). */
@@ -36,10 +39,14 @@ class SyncSchedulerTest {
     @Before
     fun setUp() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        if (WorkManager.isInitialized()) {
+            runCatching { WorkManagerTestInitHelper.closeWorkDatabase() }
+        }
+        context.getSystemService(JobScheduler::class.java)?.cancelAll()
         WorkManagerTestInitHelper.initializeTestWorkManager(context)
         workManager = WorkManager.getInstance(context)
         settingsRepository = SettingsRepository(SettingsDataStore(context))
-        syncControl = SyncControl()
+        syncControl = SyncControl(InFlightCallRegistry())
         val logger = DiagnosticLogger(context, settingsRepository, CoroutineScope(Dispatchers.Unconfined))
         scheduler = SyncScheduler(context, settingsRepository, syncControl, logger)
     }
@@ -81,7 +88,8 @@ class SyncSchedulerTest {
         // No work should be enqueued; follow-up is recorded on SyncControl.
         val infos = workManager.getWorkInfosForUniqueWork(SyncWorker.UNIQUE_MANUAL_WORK_NAME).get()
         assertTrue(infos.isEmpty() || infos.none { it.state == WorkInfo.State.RUNNING })
-        assertTrue(syncControl.endSession())
+        val followUp = syncControl.endSession()
+        assertEquals(setOf(1L), followUp.pairIds)
     }
 
     @Test
@@ -95,15 +103,27 @@ class SyncSchedulerTest {
         )
         scheduler.reconcileContentWatches(mapOf(pair.id to pair))
 
-        val armed = workManager.getWorkInfosForUniqueWork(SyncScheduler.contentWatchName(7L)).get()
-        assertEquals(1, armed.size)
-        assertEquals(WorkInfo.State.ENQUEUED, armed.first().state)
+        val armed = awaitWork(SyncScheduler.contentWatchName(7L), WorkInfo.State.ENQUEUED)
+        assertEquals(armed.toString(), 1, armed.size)
+        assertEquals(armed.toString(), WorkInfo.State.ENQUEUED, armed.first().state)
         assertTrue(armed.first().tags.contains(SyncScheduler.CONTENT_WATCH_TAG))
 
         scheduler.reconcileContentWatches(emptyMap())
 
-        val after = workManager.getWorkInfosForUniqueWork(SyncScheduler.contentWatchName(7L)).get()
-        assertTrue(after.all { it.state == WorkInfo.State.CANCELLED })
+        val after = awaitWork(SyncScheduler.contentWatchName(7L), WorkInfo.State.CANCELLED)
+        assertEquals(after.toString(), 1, after.size)
+        assertEquals(after.toString(), WorkInfo.State.CANCELLED, after.first().state)
+    }
+
+    private fun awaitWork(name: String, want: WorkInfo.State): List<WorkInfo> {
+        var last = emptyList<WorkInfo>()
+        repeat(20) {
+            ShadowLooper.runUiThreadTasks()
+            last = workManager.getWorkInfosForUniqueWork(name).get()
+            if (last.any { it.state == want }) return last
+            Thread.sleep(25)
+        }
+        return last
     }
 
     @Test

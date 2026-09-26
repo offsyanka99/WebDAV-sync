@@ -15,8 +15,11 @@ import org.vovchenko.webdavsync.data.local.WebDavAccountEntity
 import org.vovchenko.webdavsync.data.local.saf.LocalFileIo
 import org.vovchenko.webdavsync.data.local.saf.SafFolderAccess
 import org.vovchenko.webdavsync.data.remote.WebDavClientFactory
+import org.vovchenko.webdavsync.data.remote.WebDavPathSafety
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
+import org.vovchenko.webdavsync.data.repository.SyncFileStateRepository
 import org.vovchenko.webdavsync.data.repository.WebDavAccountRepository
+import org.vovchenko.webdavsync.domain.sync.RemotePaths
 import javax.inject.Inject
 
 @HiltViewModel
@@ -26,6 +29,7 @@ class AccountsViewModel @Inject constructor(
     private val clientFactory: WebDavClientFactory,
     private val localFileIo: LocalFileIo,
     private val safFolderAccess: SafFolderAccess,
+    private val syncFileStateRepository: SyncFileStateRepository,
 ) : ViewModel() {
 
     val accounts: StateFlow<List<WebDavAccountEntity>> =
@@ -42,9 +46,8 @@ class AccountsViewModel @Inject constructor(
 
     /**
      * Deletes [account] (cascades its folder pairs + sync state at the DB level). When
-     * [alsoDeleteData] is set, also best-effort deletes each of its folder pairs' local folder
-     * *contents* (never the granted tree-root document itself, see [LocalFileIo.deleteContents])
-     * and remote root folder before removing the account row (plan §4.5).
+     * [alsoDeleteData] is set, deletes only files this app has a baseline for. The SAF tree
+     * root and an empty remote path (the account root) are never deleted.
      */
     fun deleteAccount(account: WebDavAccountEntity, alsoDeleteData: Boolean) {
         viewModelScope.launch {
@@ -59,25 +62,45 @@ class AccountsViewModel @Inject constructor(
                     null
                 }
                 var failures = 0
+                var tracked = 0
+                try {
                 pairs.forEach { pair ->
                     val localUri = Uri.parse(pair.localFolderUri)
-                    val localOk = runCatching { localFileIo.deleteContents(localUri, "") }.getOrDefault(false)
-                    if (!localOk) failures++
-
-                    if (client != null) {
-                        val remoteOk = runCatching { client.delete(pair.remoteFolderPath).isSuccess }.getOrDefault(false)
+                    val remoteRoot = runCatching { WebDavPathSafety.sanitize(pair.remoteFolderPath) }.getOrNull()
+                    val rows = syncFileStateRepository.getForFolderPair(pair.id)
+                        .sortedByDescending { row -> row.relativePath.count { it == '/' } }
+                    if (rows.isEmpty()) {
+                        failures++
+                    }
+                    for (row in rows) {
+                        tracked++
+                        val stillThere = localFileIo.statOrNull(localUri, row.relativePath) != null
+                        if (stillThere && !localFileIo.delete(localUri, row.relativePath)) failures++
+                        if (row.isDirectory) continue
+                        if (remoteRoot.isNullOrEmpty() || client == null) {
+                            failures++
+                            continue
+                        }
+                        val remotePath = RemotePaths.join(remoteRoot, row.relativePath)
+                        val remoteOk = runCatching { client.delete(remotePath).isSuccess }.getOrDefault(false)
                         if (!remoteOk) failures++
                     }
 
-                    // Only release the SAF grant if no other (surviving) folder pair still uses it.
                     val stillReferenced = folderPairRepository.observeAll().first()
                         .any { it.id != pair.id && it.localFolderUri == pair.localFolderUri }
                     if (!stillReferenced) {
                         runCatching { safFolderAccess.releaseAccess(localUri) }
                     }
                 }
-                if (failures > 0) {
-                    _deleteWarning.value = "Some local/cloud data for \"${account.displayName}\" could not be deleted ($failures item(s))."
+                } finally {
+                    client?.close()
+                }
+                _deleteWarning.value = when {
+                    tracked == 0 ->
+                        "No synced files were recorded for \"${account.displayName}\", so no files were deleted."
+                    failures > 0 ->
+                        "Some synced files for \"${account.displayName}\" could not be deleted ($failures item(s))."
+                    else -> null
                 }
             }
             accountRepository.deleteAccount(account)

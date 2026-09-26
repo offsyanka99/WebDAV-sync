@@ -13,8 +13,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SyncFileStateEntity::class,
         SyncLogEntity::class,
     ],
-    version = 2,
-    exportSchema = false,
+    version = 4,
+    exportSchema = true,
 )
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
@@ -29,6 +29,22 @@ abstract class AppDatabase : RoomDatabase() {
         val MIGRATION_1_2: Migration = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE folder_pairs ADD COLUMN lastLocalFingerprint INTEGER")
+            }
+        }
+
+        val MIGRATION_2_3: Migration = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE folder_pairs ADD COLUMN lastRemoteScanAt INTEGER")
+                db.execSQL("ALTER TABLE sync_file_state ADD COLUMN lastSyncedEtag TEXT")
+                db.execSQL("ALTER TABLE sync_file_state ADD COLUMN isDirectory INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        val MIGRATION_3_4: Migration = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE folder_pairs ADD COLUMN lastCheapFingerprint INTEGER")
+                db.execSQL("ALTER TABLE folder_pairs ADD COLUMN lastFullLocalScanAt INTEGER")
+                db.execSQL("ALTER TABLE folder_pairs ADD COLUMN lastContentHashSweepAt INTEGER")
             }
         }
     }

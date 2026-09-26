@@ -34,6 +34,10 @@ class BootCompletedReceiver : BroadcastReceiver() {
                 if (settings.autoStartOnBoot) {
                     syncScheduler.reschedulePeriodicSync()
                     diagnosticLogger.i("BootCompleted", "Periodic sync rescheduled after reboot")
+                } else {
+                    // WorkManager would otherwise restore the periodic job on its own.
+                    syncScheduler.cancelPeriodicSync()
+                    diagnosticLogger.i("BootCompleted", "Periodic sync cancelled until the app is opened")
                 }
             } finally {
                 pendingResult.finish()

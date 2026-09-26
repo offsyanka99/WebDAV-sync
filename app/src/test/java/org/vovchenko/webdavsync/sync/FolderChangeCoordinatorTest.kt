@@ -33,6 +33,7 @@ import org.vovchenko.webdavsync.data.local.settings.AppSettings
 import org.vovchenko.webdavsync.data.local.settings.SettingsDataStore
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
 import org.vovchenko.webdavsync.data.repository.SettingsRepository
+import org.vovchenko.webdavsync.data.remote.InFlightCallRegistry
 import org.vovchenko.webdavsync.sync.control.SyncControl
 import org.vovchenko.webdavsync.sync.worker.SyncScheduler
 
@@ -89,8 +90,8 @@ class FolderChangeCoordinatorTest {
             advanceTimeBy(FolderChangeCoordinator.CHEAP_POLL_MS)
             runCurrent()
             assertEquals(
-                "one cheap poll after ${FolderChangeCoordinator.CHEAP_POLL_MS}ms",
-                seeded + 1,
+                "healthy observer does not keep polling",
+                seeded,
                 fingerprint.scans.get(),
             )
 
@@ -130,11 +131,11 @@ class FolderChangeCoordinatorTest {
 
     private fun coordinator(scope: CoroutineScope, fingerprint: LocalTreeFingerprint): FolderChangeCoordinator {
         val logger = DiagnosticLogger(context, settingsRepository, scope)
-        val syncControl = SyncControl()
+        val syncControl = SyncControl(InFlightCallRegistry())
         val scheduler = SyncScheduler(context, settingsRepository, syncControl, logger)
         return FolderChangeCoordinator(
             context = context,
-            folderPairRepository = FolderPairRepository(db.folderPairDao()),
+            folderPairRepository = FolderPairRepository(db.folderPairDao(), db),
             settingsRepository = settingsRepository,
             debouncer = FolderChangeDebouncer(scope),
             syncScheduler = scheduler,

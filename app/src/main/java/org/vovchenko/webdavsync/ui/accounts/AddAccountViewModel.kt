@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.vovchenko.webdavsync.data.local.security.CertificateDescriptions
 import org.vovchenko.webdavsync.data.local.security.WebDavCredentials
 import org.vovchenko.webdavsync.data.repository.WebDavConnectionRepository
 import javax.inject.Inject
@@ -20,6 +21,8 @@ data class AddAccountUiState(
     val password: String = "",
     val trustedCertificateBytes: ByteArray? = null,
     val trustedCertificateFileName: String? = null,
+    val trustedCertificateSubject: String? = null,
+    val trustedCertificateFingerprint: String? = null,
     val isSaving: Boolean = false,
     val error: String? = null,
     val saved: Boolean = false,
@@ -43,10 +46,47 @@ class AddAccountViewModel @Inject constructor(
 
     fun setTrustedCertificate(uri: android.net.Uri) {
         val bytes = runCatching {
-            context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-        }.getOrNull()
-        val fileName = uri.lastPathSegment
-        _uiState.value = _uiState.value.copy(trustedCertificateBytes = bytes, trustedCertificateFileName = fileName)
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val buffer = java.io.ByteArrayOutputStream()
+                val chunk = ByteArray(8192)
+                var total = 0
+                while (true) {
+                    val read = input.read(chunk)
+                    if (read < 0) break
+                    total += read
+                    if (total > CertificateDescriptions.MAX_BYTES) {
+                        error("Certificate file is too large")
+                    }
+                    buffer.write(chunk, 0, read)
+                }
+                buffer.toByteArray()
+            }
+        }.getOrElse {
+            _uiState.value = _uiState.value.copy(error = it.message ?: "Could not read certificate")
+            return
+        }
+        if (bytes == null) {
+            _uiState.value = _uiState.value.copy(error = "Could not read certificate")
+            return
+        }
+        val described = CertificateDescriptions.parse(bytes)
+        if (described == null) {
+            _uiState.value = _uiState.value.copy(
+                trustedCertificateBytes = null,
+                trustedCertificateFileName = null,
+                trustedCertificateSubject = null,
+                trustedCertificateFingerprint = null,
+                error = "That file is not an X.509 certificate",
+            )
+            return
+        }
+        _uiState.value = _uiState.value.copy(
+            trustedCertificateBytes = bytes,
+            trustedCertificateFileName = uri.lastPathSegment,
+            trustedCertificateSubject = described.subject,
+            trustedCertificateFingerprint = described.sha256Fingerprint,
+            error = null,
+        )
     }
 
     fun save() {

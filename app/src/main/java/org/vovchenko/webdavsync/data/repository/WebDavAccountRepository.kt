@@ -1,6 +1,8 @@
 package org.vovchenko.webdavsync.data.repository
 
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withContext
 import org.vovchenko.webdavsync.data.local.WebDavAccountDao
 import org.vovchenko.webdavsync.data.local.WebDavAccountEntity
 import org.vovchenko.webdavsync.data.local.security.CredentialStore
@@ -22,14 +24,14 @@ class WebDavAccountRepository @Inject constructor(
 
     suspend fun addAccount(account: WebDavAccountEntity, credentials: WebDavCredentials): Long {
         val id = dao.insert(account)
-        credentialStore.save(id, credentials)
+        withContext(Dispatchers.IO) { credentialStore.save(id, credentials) }
         return id
     }
 
     suspend fun updateAccount(account: WebDavAccountEntity, credentials: WebDavCredentials? = null) {
         dao.update(account)
         if (credentials != null) {
-            credentialStore.save(account.id, credentials)
+            withContext(Dispatchers.IO) { credentialStore.save(account.id, credentials) }
         }
     }
 

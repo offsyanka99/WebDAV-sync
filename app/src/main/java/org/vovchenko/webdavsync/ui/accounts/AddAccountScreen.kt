@@ -115,7 +115,14 @@ fun AddAccountScreen(
                 },
             )
             OutlinedButton(onClick = { certPicker.launch(arrayOf("*/*")) }, modifier = Modifier.fillMaxWidth()) {
-                Text(uiState.trustedCertificateFileName ?: "Import custom CA certificate (optional)")
+                Text(uiState.trustedCertificateFileName ?: "Import server certificate (optional)")
+            }
+            if (uiState.trustedCertificateSubject != null && uiState.trustedCertificateFingerprint != null) {
+                Text(
+                    text = "Trust this certificate only (not as a CA)\n${uiState.trustedCertificateSubject}\nSHA-256 ${uiState.trustedCertificateFingerprint}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             if (uiState.error != null) {
                 Text(text = uiState.error!!, color = MaterialTheme.colorScheme.error)

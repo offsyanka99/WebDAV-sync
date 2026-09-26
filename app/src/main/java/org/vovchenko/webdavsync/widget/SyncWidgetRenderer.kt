@@ -8,6 +8,7 @@ import androidx.core.content.ContextCompat
 import org.vovchenko.webdavsync.MainActivity
 import org.vovchenko.webdavsync.R
 import org.vovchenko.webdavsync.domain.sync.SyncStatusDisplay
+import org.vovchenko.webdavsync.sync.worker.WidgetSyncReceiver
 import org.vovchenko.webdavsync.ui.components.Formatters
 
 /** Builds [RemoteViews] for the 4×2 sync status widget. */
@@ -58,8 +59,8 @@ object SyncWidgetRenderer {
         )
         views.setOnClickPendingIntent(R.id.widget_root, openApp)
 
-        val syncIntent = Intent(context, SyncWidgetProvider::class.java).apply {
-            action = SyncWidgetProvider.ACTION_SYNC_NOW
+        val syncIntent = Intent(context, WidgetSyncReceiver::class.java).apply {
+            action = WidgetSyncReceiver.ACTION_SYNC_NOW
         }
         val syncPending = PendingIntent.getBroadcast(
             context,

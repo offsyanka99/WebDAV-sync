@@ -33,6 +33,8 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.flow.MutableStateFlow
+import org.vovchenko.webdavsync.sync.control.SyncRequestToken
+import javax.inject.Inject
 import org.vovchenko.webdavsync.ui.accounts.AccountsScreen
 import org.vovchenko.webdavsync.ui.accounts.AddAccountScreen
 import org.vovchenko.webdavsync.ui.folders.FoldersScreen
@@ -57,9 +59,11 @@ class MainActivity : ComponentActivity() {
     /** When true, Overview runs [org.vovchenko.webdavsync.ui.overview.OverviewViewModel.requestSync] (widget + mobile warn). */
     private val pendingSyncRequest = MutableStateFlow(false)
 
+    @Inject lateinit var syncRequestToken: SyncRequestToken
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        pendingSyncRequest.value = intent.consumeRequestSync()
+        pendingSyncRequest.value = syncRequestToken.accepts(intent)
         enableEdgeToEdge()
         setContent {
             WebDavSyncTheme {
@@ -75,7 +79,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.consumeRequestSync()) {
+        if (syncRequestToken.accepts(intent)) {
             pendingSyncRequest.value = true
         }
     }
@@ -84,12 +88,6 @@ class MainActivity : ComponentActivity() {
         /** Widget Sync while "warn on mobile data" is on — open Overview and run the same check. */
         const val EXTRA_REQUEST_SYNC = "org.vovchenko.webdavsync.EXTRA_REQUEST_SYNC"
     }
-}
-
-private fun Intent.consumeRequestSync(): Boolean {
-    if (!getBooleanExtra(MainActivity.EXTRA_REQUEST_SYNC, false)) return false
-    removeExtra(MainActivity.EXTRA_REQUEST_SYNC)
-    return true
 }
 
 @Composable

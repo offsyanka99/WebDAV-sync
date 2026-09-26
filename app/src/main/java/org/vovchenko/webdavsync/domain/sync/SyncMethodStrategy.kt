@@ -25,16 +25,22 @@ private fun localState(local: LocalFileEntry?, baseline: SyncFileStateEntity?): 
 }
 
 /**
- * Remote change detection. WebDAV `Last-Modified` is often unreliable vs the mtime we stored at
- * last sync (server rounding, timezone, or local vs remote clocks). Treating mtime skew as a
- * remote modification caused two-way sync to *re-download* files the user deleted locally.
- * Size is the stable signal for "did remote content change?".
+ * Remote change detection. Size is the stable signal. A stored ETag that disagrees with the
+ * live ETag is also a modification, including when the size stayed the same.
+ * Missing ETags on either side are not treated as a change (first seed fills the column).
  */
 private fun remoteState(remote: RemoteFileEntry?, baseline: SyncFileStateEntity?): ChangeState = when {
     baseline == null -> if (remote != null) ChangeState.NEW else ChangeState.UNCHANGED
     remote == null -> ChangeState.DELETED
     remote.sizeBytes != baseline.lastSyncedSize -> ChangeState.MODIFIED
+    etagDiffers(remote, baseline) -> ChangeState.MODIFIED
     else -> ChangeState.UNCHANGED
+}
+
+private fun etagDiffers(remote: RemoteFileEntry, baseline: SyncFileStateEntity): Boolean {
+    val live = remote.etag?.takeIf { it.isNotBlank() } ?: return false
+    val stored = baseline.lastSyncedEtag?.takeIf { it.isNotBlank() } ?: return false
+    return live != stored
 }
 
 /** Picks the "winner" for a true conflict — the more recently modified side wins, ties go to local. */
@@ -50,10 +56,26 @@ internal fun isConflictedCopyPath(relativePath: String): Boolean =
 
 private const val CONFLICTED_COPY_MARKER = "(conflicted copy,"
 
+private fun remember(relativePath: String, local: LocalFileEntry, remote: RemoteFileEntry?): SyncAction.RememberInSync =
+    SyncAction.RememberInSync(
+        relativePath = relativePath,
+        sizeBytes = local.sizeBytes,
+        lastModifiedEpochMillis = local.lastModifiedEpochMillis,
+        remoteEtag = remote?.etag,
+    )
+
+/** Baseline is missing or does not yet record the current size, local mtime, or ETag. */
+private fun needsRemember(local: LocalFileEntry, remote: RemoteFileEntry?, baseline: SyncFileStateEntity?): Boolean {
+    if (baseline == null) return true
+    if (baseline.lastSyncedSize != local.sizeBytes) return true
+    if (!mtimesClose(local.lastModifiedEpochMillis, baseline.lastSyncedMtime)) return true
+    val etag = remote?.etag?.takeIf { it.isNotBlank() } ?: return false
+    return baseline.lastSyncedEtag != etag
+}
+
 /**
- * Computes the file-level (non-directory) sync action for one relative path, per sync method
- * (plan Phase 4 "Strategy per sync method"). Directory create/delete is handled separately by
- * [SyncDiffCalculator] since directories have no three-way baseline of their own.
+ * Computes the file-level (non-directory) sync action for one relative path, per sync method.
+ * Directory create/delete is handled separately by [SyncDiffCalculator].
  */
 sealed interface SyncMethodStrategy {
 
@@ -64,7 +86,7 @@ sealed interface SyncMethodStrategy {
         baseline: SyncFileStateEntity?,
     ): SyncAction?
 
-    /** Two-way: propagate whichever side changed; true conflicts (both changed) get resolved (§4.2). */
+    /** Two-way: propagate whichever side changed; true conflicts (both changed) get resolved. */
     object TwoWay : SyncMethodStrategy {
         override fun computeFileAction(
             relativePath: String,
@@ -74,60 +96,58 @@ sealed interface SyncMethodStrategy {
         ): SyncAction? {
             val lState = localState(local, baseline)
             val rState = remoteState(remote, baseline)
-
-            // Prefer the entry's own remote path (the server's actual name) over the canonical/local-safe path.
             val remotePath = remote?.relativePath ?: relativePath
             return when {
-                lState == ChangeState.UNCHANGED && rState == ChangeState.UNCHANGED -> null
+                lState == ChangeState.UNCHANGED && rState == ChangeState.UNCHANGED ->
+                    if (local != null && needsRemember(local, remote, baseline)) remember(relativePath, local, remote) else null
                 lState != ChangeState.UNCHANGED && rState == ChangeState.UNCHANGED -> when (lState) {
-                    ChangeState.DELETED -> SyncAction.DeleteRemoteFile(relativePath, remotePath)
-                    else -> SyncAction.UploadFile(relativePath, remotePath)
+                    ChangeState.DELETED -> SyncAction.DeleteRemoteFile(
+                        relativePath,
+                        remotePath,
+                        remote?.sizeBytes ?: -1L,
+                    )
+                    else -> SyncAction.UploadFile(relativePath, remotePath, remote?.etag)
                 }
                 lState == ChangeState.UNCHANGED && rState != ChangeState.UNCHANGED -> when (rState) {
-                    ChangeState.DELETED -> SyncAction.DeleteLocalFile(relativePath)
-                    else -> SyncAction.DownloadFile(relativePath, remote?.sizeBytes ?: 0L, remotePath)
+                    ChangeState.DELETED -> SyncAction.DeleteLocalFile(relativePath, local?.sizeBytes ?: -1L)
+                    else -> SyncAction.DownloadFile(relativePath, remote?.sizeBytes ?: 0L, remotePath, remote?.etag)
                 }
                 lState == ChangeState.DELETED && rState == ChangeState.DELETED -> null
-                // One side deleted, the other modified → resurrect the modified side (§4.2), not a rename-conflict.
-                lState == ChangeState.DELETED -> SyncAction.DownloadFile(relativePath, remote?.sizeBytes ?: 0L, remotePath)
-                rState == ChangeState.DELETED -> SyncAction.UploadFile(relativePath, remotePath)
-                // Both created/modified independently: size match → same content for our purposes.
-                // Do NOT require mtimesClose: after a download SAF stamps local mtime as "now" while
-                // remote keeps the original Last-Modified, which falsely looked like a conflict and
-                // triggered upload + "conflicted copy" duplicates on the next pass.
-                local != null && remote != null && local.sizeBytes == remote.sizeBytes -> null
-                // Incomplete PUT/GET (timeout mid-body) leaves both sides present with different
-                // sizes and no matching baseline. Treat as repair, not a true dual-edit conflict —
-                // otherwise we nest "(conflicted copy)" names every pass (see diagnostic logs).
+                lState == ChangeState.DELETED -> SyncAction.DownloadFile(relativePath, remote?.sizeBytes ?: 0L, remotePath, remote?.etag)
+                rState == ChangeState.DELETED -> SyncAction.UploadFile(relativePath, remotePath, remote?.etag)
+                local != null && remote != null && local.sizeBytes == remote.sizeBytes ->
+                    if (needsRemember(local, remote, baseline)) remember(relativePath, local, remote) else null
                 local != null && remote != null && shouldRepairIncompleteTransfer(
-                    relativePath, local, remote, baseline, lState, rState,
+                    relativePath, local, remote, baseline,
                 ) -> if (local.sizeBytes >= remote.sizeBytes) {
-                    SyncAction.UploadFile(relativePath, remotePath)
+                    SyncAction.UploadFile(relativePath, remotePath, remote.etag)
                 } else {
-                    SyncAction.DownloadFile(relativePath, remote.sizeBytes, remotePath)
+                    SyncAction.DownloadFile(relativePath, remote.sizeBytes, remotePath, remote.etag)
                 }
-                else -> SyncAction.Conflict(relativePath, pickWinner(local, remote), remotePath)
+                else -> SyncAction.Conflict(
+                    relativePath = relativePath,
+                    winningSide = pickWinner(local, remote),
+                    remoteRelativePath = remotePath,
+                    localSizeBytes = local?.sizeBytes ?: 0L,
+                    remoteSizeBytes = remote?.sizeBytes ?: 0L,
+                    remoteEtag = remote?.etag,
+                )
             }
         }
 
         /**
-         * Incomplete transfer / cascade repair:
-         * - Already a conflicted-copy path → never nest another conflict; overwrite smaller side.
-         * - Both NEW (no baseline) with different sizes → almost always a partial PUT, not two
-         *   independent full creates of the same name.
+         * Incomplete transfer repair. Only when a baseline already exists (or the path is already
+         * a conflict copy). Two brand-new copies of the same name with different sizes are a
+         * conflict, not a license to keep the larger file.
          */
         private fun shouldRepairIncompleteTransfer(
             relativePath: String,
             local: LocalFileEntry,
             remote: RemoteFileEntry,
             baseline: SyncFileStateEntity?,
-            lState: ChangeState,
-            rState: ChangeState,
         ): Boolean {
             if (local.sizeBytes == remote.sizeBytes) return false
             if (isConflictedCopyPath(relativePath)) return true
-            if (baseline == null && lState == ChangeState.NEW && rState == ChangeState.NEW) return true
-            // Baseline matches the larger side → smaller side is a truncated residual.
             if (baseline != null) {
                 val larger = maxOf(local.sizeBytes, remote.sizeBytes)
                 val smaller = minOf(local.sizeBytes, remote.sizeBytes)
@@ -137,7 +157,10 @@ sealed interface SyncMethodStrategy {
         }
     }
 
-    /** Mirrors remote → local; local-only edits are never pushed, local-only files are left alone. */
+    /**
+     * Mirrors remote → local. "In sync" is "remote size and ETag match the baseline and the
+     * local size matches", not "local mtime is close to the server's Last-Modified".
+     */
     object ToDevice : SyncMethodStrategy {
         override fun computeFileAction(
             relativePath: String,
@@ -145,14 +168,25 @@ sealed interface SyncMethodStrategy {
             remote: RemoteFileEntry?,
             baseline: SyncFileStateEntity?,
         ): SyncAction? = when {
-            remote == null -> if (baseline != null && local != null) SyncAction.DeleteLocalFile(relativePath) else null
-            local == null -> SyncAction.DownloadFile(relativePath, remote.sizeBytes, remote.relativePath)
-            local.sizeBytes == remote.sizeBytes && mtimesClose(local.lastModifiedEpochMillis, remote.lastModifiedEpochMillis) -> null
-            else -> SyncAction.DownloadFile(relativePath, remote.sizeBytes, remote.relativePath)
+            remote == null -> if (baseline != null && local != null) {
+                SyncAction.DeleteLocalFile(relativePath, local.sizeBytes)
+            } else {
+                null
+            }
+            local == null -> SyncAction.DownloadFile(relativePath, remote.sizeBytes, remote.relativePath, remote.etag)
+            baseline == null && local.sizeBytes == remote.sizeBytes -> remember(relativePath, local, remote)
+            baseline == null -> SyncAction.DownloadFile(relativePath, remote.sizeBytes, remote.relativePath, remote.etag)
+            remote.sizeBytes == baseline.lastSyncedSize &&
+                !etagDiffers(remote, baseline) &&
+                local.sizeBytes == remote.sizeBytes ->
+                if (needsRemember(local, remote, baseline)) remember(relativePath, local, remote) else null
+            else -> SyncAction.DownloadFile(relativePath, remote.sizeBytes, remote.relativePath, remote.etag)
         }
     }
 
-    /** Mirrors local → remote; remote-only edits are never pulled, remote-only files are left alone. */
+    /**
+     * Mirrors local → remote. Compares the local file to the baseline, not to the server mtime.
+     */
     object ToCloud : SyncMethodStrategy {
         override fun computeFileAction(
             relativePath: String,
@@ -160,10 +194,19 @@ sealed interface SyncMethodStrategy {
             remote: RemoteFileEntry?,
             baseline: SyncFileStateEntity?,
         ): SyncAction? = when {
-            local == null -> if (baseline != null && remote != null) SyncAction.DeleteRemoteFile(relativePath, remote.relativePath) else null
+            local == null -> if (baseline != null && remote != null) {
+                SyncAction.DeleteRemoteFile(relativePath, remote.relativePath, remote.sizeBytes)
+            } else {
+                null
+            }
             remote == null -> SyncAction.UploadFile(relativePath)
-            local.sizeBytes == remote.sizeBytes && mtimesClose(local.lastModifiedEpochMillis, remote.lastModifiedEpochMillis) -> null
-            else -> SyncAction.UploadFile(relativePath, remote.relativePath)
+            baseline == null && local.sizeBytes == remote.sizeBytes -> remember(relativePath, local, remote)
+            baseline == null -> SyncAction.UploadFile(relativePath, remote.relativePath, remote.etag)
+            localState(local, baseline) == ChangeState.UNCHANGED &&
+                remote.sizeBytes == baseline.lastSyncedSize &&
+                !etagDiffers(remote, baseline) ->
+                if (needsRemember(local, remote, baseline)) remember(relativePath, local, remote) else null
+            else -> SyncAction.UploadFile(relativePath, remote.relativePath, remote.etag)
         }
     }
 

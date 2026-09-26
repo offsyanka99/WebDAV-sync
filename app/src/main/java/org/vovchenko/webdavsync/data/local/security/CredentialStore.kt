@@ -27,10 +27,11 @@ class CredentialStore @Inject constructor(
     )
 
     fun save(accountId: Long, credentials: WebDavCredentials) {
+        // commit() so a process kill cannot leave an account row with no password.
         prefs.edit()
             .putString(usernameKey(accountId), credentials.username)
             .putString(passwordKey(accountId), credentials.password)
-            .apply()
+            .commit()
     }
 
     fun get(accountId: Long): WebDavCredentials? {

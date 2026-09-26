@@ -20,12 +20,20 @@ import java.io.StringReader
  * quota (RFC 4331), which Sardine doesn't expose directly.
  */
 class SardineWebDavClient(
-    private val okHttpClient: OkHttpClient,
+    private val bodyClient: OkHttpClient,
+    /** Listings, MKCOL, DELETE, exists, and quota. Shares [bodyClient]'s pool and dispatcher. */
+    private val metaClient: OkHttpClient,
     private val baseUrl: String,
     private val uploadCacheDir: File,
 ) : WebDavClient {
 
-    private val sardine by lazy { OkHttpSardine(okHttpClient) }
+    private val bodySardine by lazy { OkHttpSardine(bodyClient) }
+    private val metaSardine by lazy { OkHttpSardine(metaClient) }
+
+    override fun close() {
+        // metaClient is a newBuilder() of bodyClient, so they share the pool and dispatcher.
+        WebDavClientFactory.shutdown(bodyClient)
+    }
 
     /**
      * Builds an absolute request URL under [baseUrl].
@@ -51,7 +59,7 @@ class SardineWebDavClient(
     }
 
     override suspend fun testConnection(): Result<Unit> = runCatchingWebDav {
-        sardine.list(resolve("", asCollection = true))
+        metaSardine.list(resolve("", asCollection = true))
         Unit
     }
 
@@ -62,7 +70,7 @@ class SardineWebDavClient(
             // response. Filter it out using encoding-tolerant path comparison — a strict string
             // match fails when the server returns `test 2` and we requested `test%202`, which
             // previously made the scanner recurse into `test 2/test 2` and 404.
-            sardine.list(targetUrl)
+            metaSardine.list(targetUrl)
                 .filter { resource -> !DavHref.isSelf(resource.path, targetUrl) }
                 .map { resource ->
                     WebDavResource(
@@ -87,11 +95,8 @@ class SardineWebDavClient(
         contentType: String,
         contentLength: Long,
         openContent: () -> InputStream,
-    ): Result<Unit> =
+    ): Result<String?> =
         runCatchingWebDav {
-            if (contentLength <= 0L) {
-                throw java.io.IOException("Refusing to upload empty body for $remotePath")
-            }
             // Stream from the source (SAF) with known Content-Length. [openContent] is called on
             // every writeTo() so Digest 401 retries re-read from the start without copying the
             // whole file into cache (parallel multi‑100MB staging was OOMing / hanging sync).
@@ -115,31 +120,48 @@ class SardineWebDavClient(
                 .url(url)
                 .put(body)
                 .build()
-            okHttpClient.newCall(request).execute().use { response ->
+            bodyClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     throw java.io.IOException(
                         "PUT failed: HTTP ${response.code} for $remotePath ($contentLength bytes)",
                     )
                 }
+                response.header("ETag")
             }
         }
 
     override suspend fun download(remotePath: String): Result<InputStream> = runCatchingWebDav {
-        sardine.get(resolve(remotePath, asCollection = false))
+        bodySardine.get(resolve(remotePath, asCollection = false))
     }
 
     override suspend fun delete(remotePath: String): Result<Unit> = runCatchingWebDav {
         // Prefer no trailing slash for deletes; works for both files and most collection DELETEs.
-        sardine.delete(resolve(remotePath, asCollection = false))
+        metaSardine.delete(resolve(remotePath, asCollection = false))
     }
 
     override suspend fun createDirectory(remotePath: String): Result<Unit> = runCatchingWebDav {
-        sardine.createDirectory(resolve(remotePath, asCollection = true))
+        metaSardine.createDirectory(resolve(remotePath, asCollection = true))
+    }
+
+    override suspend fun move(fromRemotePath: String, toRemotePath: String): Result<Unit> = runCatchingWebDav {
+        val source = resolve(fromRemotePath, asCollection = false)
+        val destination = resolve(toRemotePath, asCollection = false)
+        val request = Request.Builder()
+            .url(source)
+            .method("MOVE", null)
+            .header("Destination", destination)
+            .header("Overwrite", "F")
+            .build()
+        metaClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw java.io.IOException("MOVE failed: HTTP ${response.code} $fromRemotePath -> $toRemotePath")
+            }
+        }
     }
 
     override suspend fun exists(remotePath: String): Result<Boolean> = runCatchingWebDav {
         // Collections are the usual exists() target; trailing slash avoids false 404s.
-        sardine.exists(resolve(remotePath, asCollection = true))
+        metaSardine.exists(resolve(remotePath, asCollection = true))
     }
 
     override suspend fun getQuota(): Result<WebDavQuota> = runCatchingWebDav {
@@ -150,7 +172,7 @@ class SardineWebDavClient(
             .header("Depth", "0")
             .build()
 
-        okHttpClient.newCall(request).execute().use { response ->
+        metaClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 throw java.io.IOException("PROPFIND quota failed: HTTP ${response.code}")
             }

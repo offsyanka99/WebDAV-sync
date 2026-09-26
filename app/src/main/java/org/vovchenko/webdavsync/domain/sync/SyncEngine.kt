@@ -7,10 +7,13 @@ import kotlinx.coroutines.flow.first
 import org.vovchenko.webdavsync.data.local.FolderPairEntity
 import org.vovchenko.webdavsync.data.local.SyncLogEntity
 import org.vovchenko.webdavsync.data.local.diagnostics.DiagnosticLogger
+import org.vovchenko.webdavsync.data.local.saf.LocalFileIo
+import org.vovchenko.webdavsync.data.local.saf.LocalTreeFingerprint
 import org.vovchenko.webdavsync.data.local.saf.LocalTreeScanner
+import org.vovchenko.webdavsync.data.local.saf.PathFilters
 import org.vovchenko.webdavsync.data.local.saf.SafFolderAccess
 import org.vovchenko.webdavsync.data.model.SyncEventType
-import org.vovchenko.webdavsync.data.remote.WebDavClientFactory
+import org.vovchenko.webdavsync.data.remote.WebDavClientSession
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
 import org.vovchenko.webdavsync.data.repository.SettingsRepository
 import org.vovchenko.webdavsync.data.repository.SyncFileStateRepository
@@ -34,8 +37,9 @@ class SyncEngine @Inject constructor(
     private val settingsRepository: SettingsRepository,
     private val syncLogRepository: SyncLogRepository,
     private val syncFileStateRepository: SyncFileStateRepository,
-    private val clientFactory: WebDavClientFactory,
     private val localTreeScanner: LocalTreeScanner,
+    private val localTreeFingerprint: LocalTreeFingerprint,
+    private val localFileIo: LocalFileIo,
     private val safFolderAccess: SafFolderAccess,
     private val remoteTreeScanner: RemoteTreeScanner,
     private val diffCalculator: SyncDiffCalculator,
@@ -50,6 +54,7 @@ class SyncEngine @Inject constructor(
      */
     suspend fun sync(
         folderPairId: Long,
+        clients: WebDavClientSession,
         onNeedsForeground: suspend () -> Unit = {},
     ): SyncOutcome {
         // Wall-clock start for "Last sync" timestamp; elapsedRealtime for duration (immune to clock skew).
@@ -63,7 +68,7 @@ class SyncEngine @Inject constructor(
         }
 
         return try {
-            runSync(pair, wallStart, elapsedStart, onNeedsForeground)
+            runSync(pair, wallStart, elapsedStart, clients, onNeedsForeground)
         } catch (e: CancellationException) {
             // Propagate so WorkManager can stop the worker; still record CANCELLED so Overview
             // does not keep showing "Sync in process..." / a stale OK after a superseded pass.
@@ -88,6 +93,7 @@ class SyncEngine @Inject constructor(
         pair: FolderPairEntity,
         wallStart: Long,
         elapsedStart: Long,
+        clients: WebDavClientSession,
         onNeedsForeground: suspend () -> Unit,
     ): SyncOutcome {
         diagnosticLogger.i(
@@ -116,6 +122,31 @@ class SyncEngine @Inject constructor(
         if (!safFolderAccess.hasAccess(localRootUri)) {
             return failSync(pair, elapsedStart, "Local folder access lost — reselect the local folder in this folder pair's settings")
         }
+        val cheapFingerprint = localTreeFingerprint.of(localRootUri)
+        if (IdleSyncPolicy.canSkipFullLocalWalk(
+                lastCheapFingerprint = pair.lastCheapFingerprint,
+                currentCheapFingerprint = cheapFingerprint,
+                lastFullLocalScanAt = pair.lastFullLocalScanAt,
+                nowMillis = wallStart,
+                lastLocalFingerprint = pair.lastLocalFingerprint,
+                lastSyncStatus = pair.lastSyncStatus,
+                lastRemoteScanAt = pair.lastRemoteScanAt,
+                mtimeKnownReliable = true,
+            )
+        ) {
+            diagnosticLogger.i(
+                TAG,
+                "Skip full local walk pair='${pair.name}' (cheap fingerprint unchanged)",
+            )
+            finishPair(
+                pair,
+                elapsedStart,
+                status = IdleSyncPolicy.STATUS_OK,
+                overwriteLastSync = false,
+                localFingerprint = pair.lastLocalFingerprint,
+            )
+            return SyncOutcome(durationMs = SystemClock.elapsedRealtime() - elapsedStart)
+        }
         val localEntries = runCatching {
             localTreeScanner.scan(localRootUri, pair.excludeHiddenFiles, pair.excludedSubfolders)
         }.getOrElse {
@@ -124,13 +155,23 @@ class SyncEngine @Inject constructor(
             return failSync(pair, elapsedStart, "Local folder scan failed: ${it.message}")
         }
         val localFingerprint = IdleSyncPolicy.fingerprint(localEntries)
-        diagnosticLogger.i(TAG, "Local scan: ${localEntries.size} entries fingerprint=$localFingerprint")
+        val mtimeReliable = IdleSyncPolicy.mtimeReliable(localEntries)
+        val scanMs = SystemClock.elapsedRealtime() - elapsedStart
+        val runtime = Runtime.getRuntime()
+        diagnosticLogger.i(
+            TAG,
+            "Local scan: ${localEntries.size} entries fingerprint=$localFingerprint " +
+                "scanMs=$scanMs heapFree=${runtime.freeMemory()} heapTotal=${runtime.totalMemory()}",
+        )
 
         if (IdleSyncPolicy.canSkipRemoteScan(
-                pair.syncMethod,
-                pair.lastSyncStatus,
-                pair.lastLocalFingerprint,
-                localFingerprint,
+                method = pair.syncMethod,
+                lastSyncStatus = pair.lastSyncStatus,
+                lastFingerprint = pair.lastLocalFingerprint,
+                currentFingerprint = localFingerprint,
+                lastRemoteScanAt = pair.lastRemoteScanAt,
+                nowMillis = wallStart,
+                mtimeReliable = mtimeReliable,
             )
         ) {
             diagnosticLogger.i(TAG, "Idle short-circuit pair='${pair.name}' (local fingerprint unchanged, to-cloud)")
@@ -140,6 +181,9 @@ class SyncEngine @Inject constructor(
                 status = IdleSyncPolicy.STATUS_OK,
                 overwriteLastSync = false,
                 localFingerprint = localFingerprint,
+                cheapFingerprint = if (mtimeReliable) cheapFingerprint else null,
+                rememberCheapFingerprint = true,
+                fullLocalScanAt = wallStart,
             )
             return SyncOutcome(durationMs = SystemClock.elapsedRealtime() - elapsedStart)
         }
@@ -148,7 +192,7 @@ class SyncEngine @Inject constructor(
             SyncLogEntity(folderPairId = pair.id, timestamp = wallStart, eventType = SyncEventType.SYNC_START),
         )
 
-        val client = clientFactory.create(account.baseUrl, authScheme, credentials, trustedCert)
+        val client = clients.clientFor(account.id, account.baseUrl, authScheme, credentials, trustedCert)
 
         if (syncControl.shouldStop()) return cancelledSync(pair, elapsedStart)
         syncControl.awaitWhilePaused()
@@ -165,15 +209,39 @@ class SyncEngine @Inject constructor(
             }
         }
 
-        val remoteEntries = remoteTreeScanner.scan(client, pair.remoteFolderPath, pair.excludedSubfolders)
-            .getOrElse {
-                diagnosticLogger.e(TAG, "Remote scan failed for pair='${pair.name}'", it)
-                return failSync(pair, elapsedStart, "Remote folder scan failed: ${it.message}")
-            }
-        diagnosticLogger.i(TAG, "Remote scan: ${remoteEntries.size} entries")
+        val remoteStarted = SystemClock.elapsedRealtime()
+        val remoteEntries = remoteTreeScanner.scan(
+            client,
+            pair.remoteFolderPath,
+            pair.excludedSubfolders,
+            pair.excludeHiddenFiles,
+        ).getOrElse {
+            diagnosticLogger.e(TAG, "Remote scan failed for pair='${pair.name}'", it)
+            return failSync(pair, elapsedStart, "Remote folder scan failed: ${it.message}")
+        }
+        diagnosticLogger.i(
+            TAG,
+            "Remote scan: ${remoteEntries.size} entries in ${SystemClock.elapsedRealtime() - remoteStarted}ms " +
+                "heapFree=${Runtime.getRuntime().freeMemory()}",
+        )
 
-        val baseline = syncFileStateRepository.getForFolderPair(pair.id)
-        val actions = diffCalculator.computeActions(pair.syncMethod, localEntries, remoteEntries, baseline)
+        val baseline = dropIgnoredBaseline(pair)
+        val diffActions = diffCalculator.computeActions(pair.syncMethod, localEntries, remoteEntries, baseline)
+        val hashSweepFresh = IdleSyncPolicy.hashSweepIsFresh(pair.lastContentHashSweepAt, wallStart)
+        val actions = if (hashSweepFresh) {
+            diffActions
+        } else {
+            ZeroMtimeReconciler.apply(
+                actions = diffActions,
+                syncMethod = pair.syncMethod,
+                localEntries = localEntries,
+                remoteEntries = remoteEntries,
+                baseline = baseline,
+                hashOf = { path ->
+                    localFileIo.openInputStream(localRootUri, path)?.use { ContentHash.sha256(it) }
+                },
+            )
+        }
         diagnosticLogger.i(TAG, "Diff produced ${actions.size} action(s)")
 
         val settings = settingsRepository.settings.first()
@@ -211,7 +279,12 @@ class SyncEngine @Inject constructor(
                 if (finalOutcome.isIdleNoOp && actions.isEmpty()) " (idle no-op)" else "",
         )
 
-        val persistFp = if (status == IdleSyncPolicy.STATUS_OK) localFingerprint else null
+        val ok = status == IdleSyncPolicy.STATUS_OK
+        val persistFp = if (ok) localFingerprint else null
+        val scannedRemoteAt = if (ok) wallEnd else null
+        val sweptAt = if (!hashSweepFresh && ok) wallEnd else null
+        val rememberCheap = ok || !mtimeReliable
+        val persistedCheap = if (ok && mtimeReliable) cheapFingerprint else null
 
         // Idle follow-up (0 actions, nothing transferred) must not overwrite the real pass's
         // Last sync / Duration — that made multi-minute downloads show "duration: 1s".
@@ -223,12 +296,28 @@ class SyncEngine @Inject constructor(
                 overwriteLastSync = false,
                 wallEnd = wallEnd,
                 localFingerprint = persistFp,
+                remoteScanAt = scannedRemoteAt,
+                cheapFingerprint = persistedCheap,
+                rememberCheapFingerprint = rememberCheap,
+                fullLocalScanAt = if (ok) wallEnd else null,
+                hashSweepAt = sweptAt,
             )
             return finalOutcome
         }
 
         logOutcome(pair.id, wallEnd, finalOutcome)
-        finishPair(pair, elapsedStart, status = status, wallEnd = wallEnd, localFingerprint = persistFp)
+        finishPair(
+            pair,
+            elapsedStart,
+            status = status,
+            wallEnd = wallEnd,
+            localFingerprint = persistFp,
+            remoteScanAt = scannedRemoteAt,
+            cheapFingerprint = persistedCheap,
+            rememberCheapFingerprint = rememberCheap,
+            fullLocalScanAt = if (ok) wallEnd else null,
+            hashSweepAt = sweptAt,
+        )
         return finalOutcome
     }
 
@@ -397,6 +486,11 @@ class SyncEngine @Inject constructor(
         errorLogMessage: String? = null,
         syncEndMessage: String? = null,
         localFingerprint: Long? = null,
+        remoteScanAt: Long? = null,
+        cheapFingerprint: Long? = null,
+        rememberCheapFingerprint: Boolean = false,
+        fullLocalScanAt: Long? = null,
+        hashSweepAt: Long? = null,
     ): Long {
         val duration = SystemClock.elapsedRealtime() - elapsedStart
         if (errorLogMessage != null) {
@@ -420,6 +514,10 @@ class SyncEngine @Inject constructor(
             )
         }
         val nextFp = localFingerprint ?: pair.lastLocalFingerprint
+        val nextScan = remoteScanAt ?: pair.lastRemoteScanAt
+        val nextCheap = if (rememberCheapFingerprint) cheapFingerprint else pair.lastCheapFingerprint
+        val nextFullScan = fullLocalScanAt ?: pair.lastFullLocalScanAt
+        val nextSweep = hashSweepAt ?: pair.lastContentHashSweepAt
         if (overwriteLastSync) {
             folderPairRepository.update(
                 pair.copy(
@@ -427,18 +525,46 @@ class SyncEngine @Inject constructor(
                     lastSyncDurationMs = duration,
                     lastSyncStatus = status,
                     lastLocalFingerprint = nextFp,
+                    lastRemoteScanAt = nextScan,
+                    lastCheapFingerprint = nextCheap,
+                    lastFullLocalScanAt = nextFullScan,
+                    lastContentHashSweepAt = nextSweep,
                 ),
             )
-        } else if (pair.lastSyncStatus != status || pair.lastLocalFingerprint != nextFp) {
+        } else if (
+            pair.lastSyncStatus != status ||
+            pair.lastLocalFingerprint != nextFp ||
+            pair.lastRemoteScanAt != nextScan ||
+            pair.lastCheapFingerprint != nextCheap ||
+            pair.lastFullLocalScanAt != nextFullScan ||
+            pair.lastContentHashSweepAt != nextSweep
+        ) {
             folderPairRepository.update(
                 pair.copy(
                     lastSyncStatus = status,
                     lastLocalFingerprint = nextFp,
+                    lastRemoteScanAt = nextScan,
+                    lastCheapFingerprint = nextCheap,
+                    lastFullLocalScanAt = nextFullScan,
+                    lastContentHashSweepAt = nextSweep,
                 ),
             )
         }
         return duration
     }
+
+    /**
+     * Hidden and temporary paths are out of scope. Drop their baseline rows before the diff
+     * so a filtered-out file is not classified as a local delete.
+     */
+    private suspend fun dropIgnoredBaseline(pair: org.vovchenko.webdavsync.data.local.FolderPairEntity) =
+        syncFileStateRepository.getForFolderPair(pair.id).filter { row ->
+            val ignored = PathFilters.excludedFromSync(row.relativePath, pair.excludeHiddenFiles)
+            if (ignored) {
+                syncFileStateRepository.deleteForPath(pair.id, row.relativePath)
+            }
+            !ignored
+        }
 
     private companion object {
         const val TAG = "SyncEngine"

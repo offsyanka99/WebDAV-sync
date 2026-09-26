@@ -17,8 +17,10 @@ import org.vovchenko.webdavsync.data.local.FolderPairEntity
 import org.vovchenko.webdavsync.data.local.WebDavAccountEntity
 import org.vovchenko.webdavsync.data.local.saf.SafFolderAccess
 import org.vovchenko.webdavsync.data.model.SyncMethod
+import org.vovchenko.webdavsync.data.remote.WebDavPathSafety
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
 import org.vovchenko.webdavsync.data.repository.WebDavAccountRepository
+import org.vovchenko.webdavsync.domain.sync.FolderPairEditor
 import javax.inject.Inject
 
 data class AddEditFolderPairFormState(
@@ -43,9 +45,10 @@ data class AddEditFolderPairUiState(
     val form: AddEditFolderPairFormState = AddEditFolderPairFormState(),
     val saved: Boolean = false,
     val deleted: Boolean = false,
+    val error: String? = null,
 )
 
-private data class FormEvents(val saved: Boolean = false, val deleted: Boolean = false)
+private data class FormEvents(val saved: Boolean = false, val deleted: Boolean = false, val error: String? = null)
 
 /** Default remote folder path for new folder pairs (user can change before save). */
 const val DEFAULT_REMOTE_FOLDER_PATH = "/Webdavsync"
@@ -56,6 +59,7 @@ class AddEditFolderPairViewModel @Inject constructor(
     private val folderPairRepository: FolderPairRepository,
     private val accountRepository: WebDavAccountRepository,
     private val safFolderAccess: SafFolderAccess,
+    private val folderPairEditor: FolderPairEditor,
 ) : ViewModel() {
 
     private val folderPairId: Long? = savedStateHandle.get<Long>("folderPairId")?.takeIf { it > 0 }
@@ -74,6 +78,7 @@ class AddEditFolderPairViewModel @Inject constructor(
             form = form,
             saved = events.saved,
             deleted = events.deleted,
+            error = events.error,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AddEditFolderPairUiState())
 
@@ -125,12 +130,18 @@ class AddEditFolderPairViewModel @Inject constructor(
     fun save() {
         val state = form.value
         if (!state.canSave) return
+        val remoteFolderPath = try {
+            WebDavPathSafety.sanitize(state.remoteFolderPath.trim())
+        } catch (error: IllegalArgumentException) {
+            events.value = events.value.copy(error = error.message ?: "Remote path is not safe")
+            return
+        }
         viewModelScope.launch {
             val entity = FolderPairEntity(
                 id = folderPairId ?: 0,
                 accountId = state.accountId!!,
                 name = state.name.trim(),
-                remoteFolderPath = state.remoteFolderPath.trim(),
+                remoteFolderPath = remoteFolderPath,
                 localFolderUri = state.localFolderUri!!,
                 syncMethod = state.syncMethod,
                 excludeHiddenFiles = state.excludeHiddenFiles,
@@ -139,22 +150,9 @@ class AddEditFolderPairViewModel @Inject constructor(
                 instantUpload = state.instantUpload,
                 enabled = state.enabled,
             )
-            if (folderPairId != null) {
-                val existing = folderPairRepository.observeById(folderPairId).first()
-                val sameLocal = existing?.localFolderUri == entity.localFolderUri
-                val sameRemote = existing?.remoteFolderPath == entity.remoteFolderPath
-                folderPairRepository.update(
-                    entity.copy(
-                        lastSyncAt = existing?.lastSyncAt,
-                        lastSyncDurationMs = existing?.lastSyncDurationMs,
-                        lastSyncStatus = if (sameRemote) existing?.lastSyncStatus else null,
-                        lastLocalFingerprint = if (sameLocal) existing?.lastLocalFingerprint else null,
-                    ),
-                )
-            } else {
-                folderPairRepository.add(entity)
-            }
-            events.value = events.value.copy(saved = true)
+            val existing = folderPairId?.let { folderPairRepository.observeById(it).first() }
+            folderPairEditor.save(existing, entity)
+            events.value = events.value.copy(saved = true, error = null)
         }
     }
 

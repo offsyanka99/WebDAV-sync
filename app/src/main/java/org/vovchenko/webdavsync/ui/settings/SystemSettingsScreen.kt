@@ -165,7 +165,7 @@ fun SystemSettingsScreen(
 
             SettingToggleRow(
                 label = "Auto-start after reboot",
-                help = "When enabled, periodic sync is rescheduled after the phone reboots (requires auto-sync enabled under Synchronization).",
+                help = "When off, a reboot cancels scheduled sync until you open the app. When on, scheduled sync is registered again after reboot. Requires auto-sync.",
                 helpStyle = SettingHelpStyle.CardBody,
                 checked = settings.autoStartOnBoot,
                 onCheckedChange = { viewModel.update { s -> s.copy(autoStartOnBoot = it) } },

@@ -1,5 +1,6 @@
 package org.vovchenko.webdavsync.data.remote
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.IOException
@@ -31,6 +32,8 @@ private fun toServerOrAuthError(code: Int, cause: Throwable): WebDavException = 
 internal suspend fun <T> runCatchingWebDav(block: suspend () -> T): Result<T> = withContext(Dispatchers.IO) {
     try {
         Result.success(block())
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         Result.failure(e.toWebDavException())
     }

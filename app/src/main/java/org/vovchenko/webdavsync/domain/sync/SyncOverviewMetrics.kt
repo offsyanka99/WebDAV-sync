@@ -26,11 +26,14 @@ data class SyncOverviewMetrics(
             val mostRecentPair = folderPairs
                 .filter { it.lastSyncAt != null }
                 .maxByOrNull { it.lastSyncAt!! }
+            val anyError = folderPairs.any { pair ->
+                pair.enabled && pair.lastSyncStatus.equals("ERROR", ignoreCase = true)
+            }
             val recent = RecentChangesCalculator.fromLogs(logs)
             return SyncOverviewMetrics(
                 lastSyncAtMillis = mostRecentPair?.lastSyncAt,
                 lastSyncDurationMs = mostRecentPair?.lastSyncDurationMs,
-                lastSyncStatus = mostRecentPair?.lastSyncStatus,
+                lastSyncStatus = if (anyError) "ERROR" else mostRecentPair?.lastSyncStatus,
                 uploaded = recent.uploaded,
                 downloaded = recent.downloaded,
                 deletedDevice = recent.deletedDevice,

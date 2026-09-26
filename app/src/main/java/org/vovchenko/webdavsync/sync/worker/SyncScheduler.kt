@@ -19,6 +19,7 @@ import org.vovchenko.webdavsync.data.local.FolderPairEntity
 import org.vovchenko.webdavsync.data.local.diagnostics.DiagnosticLogger
 import org.vovchenko.webdavsync.data.local.settings.AppSettings
 import org.vovchenko.webdavsync.data.repository.SettingsRepository
+import org.vovchenko.webdavsync.sync.control.FollowUpRequest
 import org.vovchenko.webdavsync.sync.control.SyncControl
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
@@ -36,9 +37,26 @@ class SyncScheduler @Inject constructor(
 
     /** Call whenever auto-sync settings change (autoSyncEnabled, interval, wifiOnly, onlyWhileCharging). */
     suspend fun reschedulePeriodicSync() {
+        enqueuePeriodic(ExistingPeriodicWorkPolicy.UPDATE)
+    }
+
+    /**
+     * Ensures a periodic job exists without resetting its timer.
+     * Used on process start. Settings changes go through [reschedulePeriodicSync].
+     */
+    suspend fun ensurePeriodicSyncPresent() {
+        enqueuePeriodic(ExistingPeriodicWorkPolicy.KEEP)
+    }
+
+    /** Drops the periodic job. Boot uses this when auto-start after reboot is off. */
+    fun cancelPeriodicSync() {
+        workManager.cancelUniqueWork(SyncWorker.UNIQUE_PERIODIC_WORK_NAME)
+    }
+
+    private suspend fun enqueuePeriodic(policy: ExistingPeriodicWorkPolicy) {
         val settings = settingsRepository.settings.first()
         if (!settings.autoSyncEnabled) {
-            workManager.cancelUniqueWork(SyncWorker.UNIQUE_PERIODIC_WORK_NAME)
+            cancelPeriodicSync()
             return
         }
 
@@ -55,7 +73,7 @@ class SyncScheduler @Inject constructor(
 
         workManager.enqueueUniquePeriodicWork(
             SyncWorker.UNIQUE_PERIODIC_WORK_NAME,
-            ExistingPeriodicWorkPolicy.UPDATE,
+            policy,
             request,
         )
     }
@@ -71,11 +89,20 @@ class SyncScheduler @Inject constructor(
      * would otherwise start a second concurrent pass.
      */
     suspend fun enqueueImmediateSync(folderPairId: Long? = null) {
-        if (syncControl.isSessionActive || hasActiveManualWork() || hasRunningPeriodicWork()) {
-            syncControl.requestFollowUpSync()
+        if (syncControl.isSessionActive) {
+            syncControl.requestFollowUpSync(folderPairId)
             diagnosticLogger.i(
                 TAG,
-                "Coalesce immediate sync (sessionActive=${syncControl.isSessionActive}) pairId=${folderPairId ?: "all"}",
+                "Coalesce immediate sync during active session pairId=${folderPairId ?: "all"}",
+            )
+            return
+        }
+        if (hasActiveManualWork()) {
+            // The queued pass has not scanned yet, so it will see this edit.
+            // Recording a follow-up here used to run every enabled pair a second time.
+            diagnosticLogger.i(
+                TAG,
+                "Skip follow-up; manual sync already queued pairId=${folderPairId ?: "all"}",
             )
             return
         }
@@ -99,15 +126,18 @@ class SyncScheduler @Inject constructor(
      * Must not go through [enqueueImmediateSync] — that would see this worker still RUNNING and
      * only set the follow-up flag again (infinite deferral).
      */
-    suspend fun enqueueFollowUpIfNeeded(requested: Boolean) {
-        if (!requested) return
-        diagnosticLogger.i(TAG, "Enqueueing follow-up sync after completed pass")
+    suspend fun enqueueFollowUpIfNeeded(followUp: FollowUpRequest) {
+        if (followUp.isEmpty) return
+        diagnosticLogger.i(
+            TAG,
+            "Enqueueing follow-up sync after completed pass allPairs=${followUp.allPairs} pairs=${followUp.pairIds}",
+        )
         val settings = settingsRepository.settings.first()
         // APPEND runs after the finishing worker; APPEND_OR_REPLACE if the prior work was cancelled.
         workManager.enqueueUniqueWork(
             SyncWorker.UNIQUE_MANUAL_WORK_NAME,
             ExistingWorkPolicy.APPEND_OR_REPLACE,
-            buildManualSyncRequest(settings),
+            buildManualSyncRequest(settings, followUp.toWorkInput()),
         )
     }
 
@@ -233,8 +263,10 @@ class SyncScheduler @Inject constructor(
         const val CONTENT_WATCH_TAG = "content_watch"
         private const val CONTENT_WATCH_NAME_PREFIX = "content_watch_"
         private const val ContentResolverScheme = "content"
-        private const val CONTENT_TRIGGER_UPDATE_DELAY_SECONDS = 2L
-        private const val CONTENT_TRIGGER_MAX_DELAY_SECONDS = 30L
+        /** Batch a burst of file notifications into one wake. */
+        private const val CONTENT_TRIGGER_UPDATE_DELAY_SECONDS = 60L
+        /** A long copy should not re-wake the device every half minute. */
+        private const val CONTENT_TRIGGER_MAX_DELAY_SECONDS = 10L * 60L
         /** Floor for the flex window so JobScheduler can still batch (must stay < interval). */
         private const val MIN_FLEX_MINUTES = 5
 

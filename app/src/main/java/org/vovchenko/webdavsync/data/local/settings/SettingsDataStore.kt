@@ -25,7 +25,7 @@ class SettingsDataStore @Inject constructor(
 
     suspend fun update(transform: (AppSettings) -> AppSettings) {
         dataStore.edit { prefs ->
-            val updated = transform(prefs.toAppSettings())
+            val updated = transform(prefs.toAppSettings()).clamped()
             prefs.applyAppSettings(updated)
         }
     }
@@ -68,7 +68,7 @@ class SettingsDataStore @Inject constructor(
                 ?: defaults.batteryOptimizationDisabled,
             autoStartOnBoot = this[Keys.autoStartOnBoot] ?: defaults.autoStartOnBoot,
             diagnosticLogEnabled = this[Keys.diagnosticLogEnabled] ?: defaults.diagnosticLogEnabled,
-        )
+        ).clamped()
     }
 
     private fun androidx.datastore.preferences.core.MutablePreferences.applyAppSettings(settings: AppSettings) {

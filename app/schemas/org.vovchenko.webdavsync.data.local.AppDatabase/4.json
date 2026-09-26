@@ -1,0 +1,363 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 4,
+    "identityHash": "18c601828fcd9d78ac483a3e260a8882",
+    "entities": [
+      {
+        "tableName": "webdav_accounts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `displayName` TEXT NOT NULL, `baseUrl` TEXT NOT NULL, `authScheme` TEXT, `storageQuotaBytes` INTEGER, `storageAvailableBytes` INTEGER)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "displayName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "baseUrl",
+            "columnName": "baseUrl",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authScheme",
+            "columnName": "authScheme",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "storageQuotaBytes",
+            "columnName": "storageQuotaBytes",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "storageAvailableBytes",
+            "columnName": "storageAvailableBytes",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "folder_pairs",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `accountId` INTEGER NOT NULL, `name` TEXT NOT NULL, `remoteFolderPath` TEXT NOT NULL, `localFolderUri` TEXT NOT NULL, `syncMethod` TEXT NOT NULL, `excludeHiddenFiles` INTEGER NOT NULL, `excludedSubfolders` TEXT NOT NULL, `deleteEmptyFolders` INTEGER NOT NULL, `instantUpload` INTEGER NOT NULL, `enabled` INTEGER NOT NULL, `lastSyncAt` INTEGER, `lastSyncDurationMs` INTEGER, `lastSyncStatus` TEXT, `lastLocalFingerprint` INTEGER, `lastRemoteScanAt` INTEGER, `lastCheapFingerprint` INTEGER, `lastFullLocalScanAt` INTEGER, `lastContentHashSweepAt` INTEGER, FOREIGN KEY(`accountId`) REFERENCES `webdav_accounts`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "remoteFolderPath",
+            "columnName": "remoteFolderPath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localFolderUri",
+            "columnName": "localFolderUri",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "syncMethod",
+            "columnName": "syncMethod",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "excludeHiddenFiles",
+            "columnName": "excludeHiddenFiles",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "excludedSubfolders",
+            "columnName": "excludedSubfolders",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deleteEmptyFolders",
+            "columnName": "deleteEmptyFolders",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "instantUpload",
+            "columnName": "instantUpload",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enabled",
+            "columnName": "enabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastSyncAt",
+            "columnName": "lastSyncAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastSyncDurationMs",
+            "columnName": "lastSyncDurationMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastSyncStatus",
+            "columnName": "lastSyncStatus",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "lastLocalFingerprint",
+            "columnName": "lastLocalFingerprint",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastRemoteScanAt",
+            "columnName": "lastRemoteScanAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastCheapFingerprint",
+            "columnName": "lastCheapFingerprint",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastFullLocalScanAt",
+            "columnName": "lastFullLocalScanAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastContentHashSweepAt",
+            "columnName": "lastContentHashSweepAt",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_folder_pairs_accountId",
+            "unique": false,
+            "columnNames": [
+              "accountId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_folder_pairs_accountId` ON `${TABLE_NAME}` (`accountId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "webdav_accounts",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "sync_file_state",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `folderPairId` INTEGER NOT NULL, `relativePath` TEXT NOT NULL, `lastSyncedMtime` INTEGER NOT NULL, `lastSyncedSize` INTEGER NOT NULL, `lastSyncedHash` TEXT, `lastSyncedEtag` TEXT, `isDirectory` INTEGER NOT NULL, FOREIGN KEY(`folderPairId`) REFERENCES `folder_pairs`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "folderPairId",
+            "columnName": "folderPairId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "relativePath",
+            "columnName": "relativePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastSyncedMtime",
+            "columnName": "lastSyncedMtime",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastSyncedSize",
+            "columnName": "lastSyncedSize",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastSyncedHash",
+            "columnName": "lastSyncedHash",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "lastSyncedEtag",
+            "columnName": "lastSyncedEtag",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "isDirectory",
+            "columnName": "isDirectory",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sync_file_state_folderPairId_relativePath",
+            "unique": true,
+            "columnNames": [
+              "folderPairId",
+              "relativePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_sync_file_state_folderPairId_relativePath` ON `${TABLE_NAME}` (`folderPairId`, `relativePath`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "folder_pairs",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "folderPairId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "sync_log",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `folderPairId` INTEGER NOT NULL, `timestamp` INTEGER NOT NULL, `eventType` TEXT NOT NULL, `fileCount` INTEGER NOT NULL, `message` TEXT, FOREIGN KEY(`folderPairId`) REFERENCES `folder_pairs`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "folderPairId",
+            "columnName": "folderPairId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timestamp",
+            "columnName": "timestamp",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "eventType",
+            "columnName": "eventType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileCount",
+            "columnName": "fileCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "message",
+            "columnName": "message",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sync_log_folderPairId",
+            "unique": false,
+            "columnNames": [
+              "folderPairId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_sync_log_folderPairId` ON `${TABLE_NAME}` (`folderPairId`)"
+          },
+          {
+            "name": "index_sync_log_timestamp",
+            "unique": false,
+            "columnNames": [
+              "timestamp"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_sync_log_timestamp` ON `${TABLE_NAME}` (`timestamp`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "folder_pairs",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "folderPairId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '18c601828fcd9d78ac483a3e260a8882')"
+    ]
+  }
+}

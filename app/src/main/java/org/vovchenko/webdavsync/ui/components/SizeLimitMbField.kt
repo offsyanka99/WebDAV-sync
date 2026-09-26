@@ -19,8 +19,13 @@ fun SizeLimitMbField(
     OutlinedTextField(
         value = valueBytes?.let { (it / (1024 * 1024)).toString() } ?: "",
         onValueChange = { text ->
-            val mb = text.toLongOrNull()
-            onBytesChange(mb?.let { it * 1024 * 1024 })
+            if (text.isEmpty()) {
+                onBytesChange(null)
+                return@OutlinedTextField
+            }
+            val mb = text.toLongOrNull() ?: return@OutlinedTextField
+            val bytes = mb.coerceIn(0L, MAX_MB) * 1024L * 1024L
+            onBytesChange(bytes)
         },
         label = { Text(label) },
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -28,3 +33,5 @@ fun SizeLimitMbField(
         singleLine = true,
     )
 }
+
+private const val MAX_MB = 1024L * 1024L // 1 PiB in MB would overflow; 1M MB = 1 TiB

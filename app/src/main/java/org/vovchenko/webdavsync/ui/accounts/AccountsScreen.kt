@@ -149,13 +149,16 @@ private fun DeleteAccountDialog(
                     }
                     Text("Delete \"${account.displayName}\"?$pairsText")
                 } else {
-                    Text("This cannot be undone.")
+                    Text(
+                        "This cannot be undone. Choosing to delete files removes only files this app has synced. " +
+                            "The folder you granted on the phone stays, and the server root is never deleted.",
+                    )
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.padding(top = 8.dp),
                     ) {
                         Checkbox(checked = alsoDeleteData, onCheckedChange = { alsoDeleteData = it })
-                        Text("Also delete the files on device and in the cloud")
+                        Text("Also delete synced files on the device and in the cloud")
                     }
                 }
             }

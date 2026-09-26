@@ -35,6 +35,17 @@ data class FolderPairEntity(
     val lastSyncAt: Long? = null,
     val lastSyncDurationMs: Long? = null,
     val lastSyncStatus: String? = null,
-    /** Full local-tree fingerprint from the last successful scan; used to skip idle to-cloud passes. */
+    /** Full local-tree fingerprint from the last successful scan; used to skip an unchanged remote walk. */
     val lastLocalFingerprint: Long? = null,
+    /** Wall-clock time of the last PROPFIND walk. Unchanged-tree skips expire after a day. */
+    val lastRemoteScanAt: Long? = null,
+    /**
+     * Cheap root snapshot from the last full local walk whose mtimes were real.
+     * Null when that walk saw mtime 0, so the next pass cannot skip the walk.
+     */
+    val lastCheapFingerprint: Long? = null,
+    /** Wall-clock time of the last full SAF walk. */
+    val lastFullLocalScanAt: Long? = null,
+    /** Wall-clock time of the last content-hash sweep of mtime-0 files. */
+    val lastContentHashSweepAt: Long? = null,
 )

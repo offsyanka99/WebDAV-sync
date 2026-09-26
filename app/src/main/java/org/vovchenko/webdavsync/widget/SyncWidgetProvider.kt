@@ -10,12 +10,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import org.vovchenko.webdavsync.MainActivity
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
 import org.vovchenko.webdavsync.data.repository.SyncLogRepository
 import org.vovchenko.webdavsync.domain.sync.SyncOverviewMetrics
-import org.vovchenko.webdavsync.sync.control.ManualSyncDecision
-import org.vovchenko.webdavsync.sync.control.ManualSyncStarter
 
 /**
  * 4×2 home-screen widget: last sync status, recent change counts, and a Sync button.
@@ -38,39 +35,14 @@ class SyncWidgetProvider : AppWidgetProvider() {
     }
 
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == ACTION_SYNC_NOW) {
-            val pending = goAsync()
-            CoroutineScope(Dispatchers.IO).launch {
-                try {
-                    val entry = entryPoint(context)
-                    val settings = entry.settingsRepository().settings.first()
-                    // Widget cannot host the Compose dialog — open Overview so the same warning runs.
-                    when (ManualSyncStarter.prepareManualSync(context, settings)) {
-                        ManualSyncDecision.NeedsMobileDataConfirm -> {
-                            val open = Intent(context, MainActivity::class.java).apply {
-                                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-                                putExtra(MainActivity.EXTRA_REQUEST_SYNC, true)
-                            }
-                            context.startActivity(open)
-                            return@launch
-                        }
-                        ManualSyncDecision.Proceed -> Unit
-                    }
-                    entry.syncScheduler().enqueueImmediateSync()
-                    // Paint from DB + WorkManager only — never force "Syncing…" that can outlive the worker.
-                    refreshNow(context)
-                } finally {
-                    pending.finish()
-                }
-            }
+        // Sync taps go to the non-exported WidgetSyncReceiver. Ignore a forged copy of that action.
+        if (intent.action == org.vovchenko.webdavsync.sync.worker.WidgetSyncReceiver.ACTION_SYNC_NOW) {
             return
         }
         super.onReceive(context, intent)
     }
 
     companion object {
-        const val ACTION_SYNC_NOW = "org.vovchenko.webdavsync.widget.ACTION_SYNC_NOW"
-
         /**
          * Refresh every placed instance from DB + whether a worker is RUNNING.
          * Same rules as Overview — do not force a sticky "Syncing…" paint.

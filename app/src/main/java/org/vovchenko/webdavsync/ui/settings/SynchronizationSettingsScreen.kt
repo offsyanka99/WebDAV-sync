@@ -24,6 +24,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import org.vovchenko.webdavsync.data.local.settings.AppSettings
 import org.vovchenko.webdavsync.ui.components.AppScaffold
 import org.vovchenko.webdavsync.ui.components.LabelWithInfoIcon
 import org.vovchenko.webdavsync.ui.components.SettingHelpStyle
@@ -96,7 +97,8 @@ fun SynchronizationSettingsScreen(
                 Stepper(
                     label = "Interval (minutes)",
                     value = settings.autoSyncIntervalMinutes,
-                    minValue = 15,
+                    minValue = AppSettings.MIN_INTERVAL_MINUTES,
+                    maxValue = AppSettings.MAX_INTERVAL_MINUTES,
                     step = 15,
                     onValueChange = { viewModel.update { s -> s.copy(autoSyncIntervalMinutes = it) } },
                 )
@@ -140,6 +142,7 @@ fun SynchronizationSettingsScreen(
                 label = "Retry attempts",
                 value = settings.retryAttempts,
                 minValue = 0,
+                maxValue = AppSettings.MAX_RETRY_ATTEMPTS,
                 step = 1,
                 onValueChange = { viewModel.update { s -> s.copy(retryAttempts = it) } },
                 infoDescription = RETRY_ATTEMPTS_INFO,
@@ -148,6 +151,7 @@ fun SynchronizationSettingsScreen(
                 label = "Retry wait (minutes)",
                 value = settings.retryWaitMinutes,
                 minValue = 1,
+                maxValue = AppSettings.MAX_RETRY_WAIT_MINUTES,
                 step = 1,
                 onValueChange = { viewModel.update { s -> s.copy(retryWaitMinutes = it) } },
             )
@@ -160,6 +164,7 @@ private fun Stepper(
     label: String,
     value: Int,
     minValue: Int,
+    maxValue: Int,
     step: Int,
     onValueChange: (Int) -> Unit,
     infoDescription: String? = null,
@@ -181,7 +186,7 @@ private fun Stepper(
                 Icon(imageVector = Icons.Filled.Remove, contentDescription = "Decrease")
             }
             Text(value.toString())
-            IconButton(onClick = { onValueChange(value + step) }) {
+            IconButton(onClick = { onValueChange((value + step).coerceAtMost(maxValue)) }) {
                 Icon(imageVector = Icons.Filled.Add, contentDescription = "Increase")
             }
         }
@@ -223,4 +228,5 @@ private const val BATTERY_LOW_INFO =
 
 private const val BATTERY_SAVER_INFO =
     "Sets Wi‑Fi only, only while charging, 3-hour interval, and turns off sync-on-local-change. " +
-        "A folder pair’s Instant upload checkbox is unchanged."
+        "While this profile stays on, per-pair Instant upload does not watch folders or wake the phone. " +
+        "Changing any of these settings turns those watches back on."

@@ -20,8 +20,13 @@ class SyncDiffCalculator @Inject constructor() {
         baseline: List<SyncFileStateEntity>,
     ): List<SyncAction> {
         val actions = mutableListOf<SyncAction>()
-        actions += computeDirectoryActions(syncMethod, localEntries, remoteEntries)
-        actions += computeFileActions(syncMethod, localEntries, remoteEntries, baseline)
+        actions += computeDirectoryActions(syncMethod, localEntries, remoteEntries, baseline)
+        actions += computeFileActions(
+            syncMethod,
+            localEntries,
+            remoteEntries,
+            baseline.filterNot { it.isDirectory },
+        )
         return actions
     }
 
@@ -29,29 +34,72 @@ class SyncDiffCalculator @Inject constructor() {
         syncMethod: SyncMethod,
         localEntries: List<LocalFileEntry>,
         remoteEntries: List<RemoteFileEntry>,
+        baseline: List<SyncFileStateEntity>,
     ): List<SyncAction> {
         val localDirs = localEntries.filter { it.isDirectory }.map { it.relativePath }.toSet()
         // Canonicalize to the local-safe path: some SAF providers rewrite unsafe characters (e.g. `?` → `_`)
         // when a directory is created, so matching against the remote's raw name would never agree.
-        val remoteDirs = remoteEntries.filter { it.isDirectory }
-            .map { LocalNameSanitizer.sanitizeRelativePath(it.relativePath) }.toSet()
+        val remoteDirRaw = remoteEntries.filter { it.isDirectory }
+            .associate { LocalNameSanitizer.sanitizeRelativePath(it.relativePath) to it.relativePath }
+        val baselineDirs = baseline.filter { it.isDirectory }.map { it.relativePath }.toSet()
         // Shallowest first so parent directories are created before their children.
-        val allDirs = (localDirs + remoteDirs).sortedBy { path -> path.count { it == '/' } }
+        // Deletes are re-ordered deepest-first by the executor.
+        val allDirs = (localDirs + remoteDirRaw.keys + baselineDirs).sortedBy { path -> path.count { it == '/' } }
 
         val actions = mutableListOf<SyncAction>()
         for (dirPath in allDirs) {
             val inLocal = dirPath in localDirs
-            val inRemote = dirPath in remoteDirs
+            val inRemote = dirPath in remoteDirRaw
+            val inBaseline = dirPath in baselineDirs
+            val remotePath = remoteDirRaw[dirPath] ?: dirPath
             when (syncMethod) {
-                SyncMethod.TWO_WAY -> {
-                    if (inRemote && !inLocal) actions += SyncAction.CreateLocalDirectory(dirPath)
-                    if (inLocal && !inRemote) actions += SyncAction.CreateRemoteDirectory(dirPath)
-                }
-                SyncMethod.TO_DEVICE -> if (inRemote && !inLocal) actions += SyncAction.CreateLocalDirectory(dirPath)
-                SyncMethod.TO_CLOUD -> if (inLocal && !inRemote) actions += SyncAction.CreateRemoteDirectory(dirPath)
+                SyncMethod.TWO_WAY -> directoryAction(
+                    actions, dirPath, remotePath, inLocal, inRemote, inBaseline,
+                    mirrorLocal = true,
+                    mirrorRemote = true,
+                )
+                SyncMethod.TO_DEVICE -> directoryAction(
+                    actions, dirPath, remotePath, inLocal, inRemote, inBaseline,
+                    mirrorLocal = true,
+                    mirrorRemote = false,
+                )
+                SyncMethod.TO_CLOUD -> directoryAction(
+                    actions, dirPath, remotePath, inLocal, inRemote, inBaseline,
+                    mirrorLocal = false,
+                    mirrorRemote = true,
+                )
             }
         }
         return actions
+    }
+
+    /**
+     * [mirrorLocal] pulls directories onto the device. [mirrorRemote] pushes them to the server.
+     * A baselined directory removed on the source side is deleted on the mirror side.
+     * To-device treats remote as the source; to-cloud treats local as the source; two-way uses both.
+     */
+    private fun directoryAction(
+        actions: MutableList<SyncAction>,
+        dirPath: String,
+        remotePath: String,
+        inLocal: Boolean,
+        inRemote: Boolean,
+        inBaseline: Boolean,
+        mirrorLocal: Boolean,
+        mirrorRemote: Boolean,
+    ) {
+        when {
+            inLocal && inRemote -> if (!inBaseline) actions += SyncAction.RememberDirectory(dirPath)
+            inBaseline && !inLocal && !inRemote -> actions += SyncAction.DropBaseline(dirPath)
+            inRemote && !inLocal && mirrorLocal && (!inBaseline || !mirrorRemote) ->
+                actions += SyncAction.CreateLocalDirectory(dirPath)
+            inLocal && !inRemote && mirrorRemote && (!inBaseline || !mirrorLocal) ->
+                actions += SyncAction.CreateRemoteDirectory(dirPath)
+            inBaseline && !inLocal && inRemote && mirrorRemote ->
+                actions += SyncAction.DeleteRemoteDirectory(dirPath, remotePath)
+            inBaseline && inLocal && !inRemote && mirrorLocal ->
+                actions += SyncAction.DeleteLocalDirectory(dirPath)
+        }
     }
 
     private fun computeFileActions(

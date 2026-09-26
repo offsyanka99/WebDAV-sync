@@ -32,6 +32,15 @@ data class AppSettings(
         syncEvenWhenBatteryLow = false,
     )
 
+    /** Keeps stepper and backup values inside the ranges the scheduler and retry loop accept. */
+    fun clamped(): AppSettings = copy(
+        uploadSizeLimitBytes = uploadSizeLimitBytes?.coerceIn(0L, MAX_SIZE_LIMIT_BYTES),
+        downloadSizeLimitBytes = downloadSizeLimitBytes?.coerceIn(0L, MAX_SIZE_LIMIT_BYTES),
+        autoSyncIntervalMinutes = autoSyncIntervalMinutes.coerceIn(MIN_INTERVAL_MINUTES, MAX_INTERVAL_MINUTES),
+        retryAttempts = retryAttempts.coerceIn(0, MAX_RETRY_ATTEMPTS),
+        retryWaitMinutes = retryWaitMinutes.coerceIn(1, MAX_RETRY_WAIT_MINUTES),
+    )
+
     fun isBatterySaverProfile(): Boolean =
         wifiOnly &&
             onlyWhileCharging &&
@@ -43,5 +52,10 @@ data class AppSettings(
     companion object {
         /** 3 hours — inside the planned 2–6h battery-saver window. */
         const val BATTERY_SAVER_INTERVAL_MINUTES = 180
+        const val MIN_INTERVAL_MINUTES = 15
+        const val MAX_INTERVAL_MINUTES = 7 * 24 * 60
+        const val MAX_RETRY_ATTEMPTS = 10
+        const val MAX_RETRY_WAIT_MINUTES = 24 * 60
+        const val MAX_SIZE_LIMIT_BYTES = 1024L * 1024L * 1024L * 1024L // 1 TiB
     }
 }

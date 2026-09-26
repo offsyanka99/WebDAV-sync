@@ -18,6 +18,7 @@ import org.vovchenko.webdavsync.data.local.saf.SafFolderAccess
 import org.vovchenko.webdavsync.data.local.settings.AppSettings
 import org.vovchenko.webdavsync.data.model.SyncMethod
 import org.vovchenko.webdavsync.data.remote.WebDavPathSafety
+import org.vovchenko.webdavsync.domain.sync.BaseUrlNormalizer
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
 import org.vovchenko.webdavsync.data.repository.SettingsRepository
 import org.vovchenko.webdavsync.data.repository.WebDavAccountRepository
@@ -96,10 +97,7 @@ class BackupRestoreViewModel @Inject constructor(
                 val version = json.optInt("version", 0)
                 require(version in 1..BACKUP_VERSION) { "Unsupported backup format version: $version" }
 
-                json.optJSONObject("settings")?.let { settingsJson ->
-                    settingsRepository.update { settingsJson.toAppSettings(it) }
-                }
-
+                val settingsJson = json.optJSONObject("settings")
                 val accounts = accountRepository.observeAll().first()
                 val pairsJson = json.optJSONArray("folderPairs") ?: JSONArray()
                 val toRestore = mutableListOf<FolderPairEntity>()
@@ -107,27 +105,32 @@ class BackupRestoreViewModel @Inject constructor(
                 for (i in 0 until pairsJson.length()) {
                     val pairJson = pairsJson.getJSONObject(i)
                     val accountBaseUrl = pairJson.optString("accountBaseUrl", "")
-                    val account = accounts.firstOrNull { it.baseUrl == accountBaseUrl }
+                    val wantedUrl = runCatching { BaseUrlNormalizer.normalize(accountBaseUrl) }.getOrNull()
+                    val account = accounts.firstOrNull { existing ->
+                        wantedUrl != null &&
+                            runCatching { BaseUrlNormalizer.normalize(existing.baseUrl) }.getOrNull() == wantedUrl
+                    }
                     val localFolderUri = pairJson.optString("localFolderUri", "")
                     val remoteFolderPath = pairJson.optString("remoteFolderPath", "")
-                    val hasSafeRemotePath = runCatching { WebDavPathSafety.sanitize(remoteFolderPath) }.isSuccess
+                    val safeRemotePath = runCatching { WebDavPathSafety.sanitize(remoteFolderPath) }.getOrNull()
                     val hasLocalAccess = localFolderUri.isNotBlank() &&
                         runCatching { safFolderAccess.hasAccess(Uri.parse(localFolderUri)) }.getOrDefault(false)
-                    if (account == null || !hasSafeRemotePath || !hasLocalAccess) {
+                    if (account == null || safeRemotePath == null || !hasLocalAccess) {
                         skipped++
                         continue
                     }
-                    toRestore += pairJson.toFolderPairEntity(account.id)
+                    toRestore += pairJson.toFolderPairEntity(account.id).copy(remoteFolderPath = safeRemotePath)
                 }
 
-                // Replace (not append): drop current pairs first so restore overrides Folders.
+                val keptUris = toRestore.map { it.localFolderUri }.toSet()
                 val existing = folderPairRepository.observeAll().first()
+                folderPairRepository.replaceAll(toRestore)
                 existing.forEach { pair ->
-                    runCatching { safFolderAccess.releaseAccess(Uri.parse(pair.localFolderUri)) }
+                    if (pair.localFolderUri !in keptUris) {
+                        runCatching { safFolderAccess.releaseAccess(Uri.parse(pair.localFolderUri)) }
+                    }
                 }
-                folderPairRepository.deleteAll()
-
-                toRestore.forEach { folderPairRepository.add(it) }
+                settingsJson?.let { settingsRepository.update { current -> it.toAppSettings(current) } }
                 val restored = toRestore.size
                 "Restored $restored folder pair(s)" +
                     if (skipped > 0) ", skipped $skipped (missing account/folder access, or unsafe path)" else ""

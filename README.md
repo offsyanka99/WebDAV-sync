@@ -2,7 +2,7 @@
 
 Android app that keeps local folders and WebDAV remote folders in sync — manually, on a schedule, or when files change.
 
-**Current release:** [v1.1.3](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.1.3)  
+**Current release:** [v1.1.5](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.1.5)  
 **Min Android:** 8.0 (API 26)  
 **License:** [MIT](LICENSE)
 
@@ -51,7 +51,7 @@ Default remote path suggestion: `/Webdavsync`.
 ### Requirements
 
 - JDK 17+
-- Android SDK (compile/target SDK 35)
+- Android SDK (compile SDK 37, target SDK 35)
 - Optional: a release keystore for signed builds
 
 ### Debug
@@ -106,6 +106,28 @@ Core flow: scan local + remote → diff against last-sync baseline → transfer/
 - **Issues:** [GitHub Issues](https://github.com/offsyanka99/WebDAV-sync/issues)
 
 ## Changelog (recent)
+
+### v1.1.5
+
+- **Less work when nothing changed.** Two-way and to-device sync skip the server for up to 24 hours when the local tree is unchanged, the same way to-cloud already did. A remote-only edit is still picked up on that daily check.
+- **Faster local scans.** Folder listings use one storage query per directory. If the folder root is unchanged and a full walk happened in the last 6 hours, that walk is skipped.
+- **One local edit no longer starts a second full sync.** A follow-up runs only for changes that arrive during a pass, and only for the folder pair that changed.
+- **Instant upload wakes less often.** The system watch waits about a minute and at most 10 minutes, so a burst of new files is one wake. The 90-second fallback poll runs only when the in-app watcher could not register.
+- **Battery saver pauses per-pair Instant upload** while that profile stays on. The checkboxes are kept; changing any battery-saver setting turns the watches back on.
+- **Shorter radio use.** One connection per account for a pass, closed when the pass ends. Directory listings time out after 60 seconds. Files whose storage reports modification time 0 are not re-read for a content hash more than once a day when the size is unchanged.
+- Database upgrades from v1.1.4 automatically (schema 4).
+
+### v1.1.4
+
+- **Matching files are remembered.** The first sync of trees that already match records a baseline, so a later delete stays deleted. A first size mismatch no longer overwrites the smaller file.
+- **Hidden-file exclusion is symmetric.** The default filter ignores dotfiles on the server as well as on the device, so the next two-way pass does not delete them.
+- **Retargeting a folder pair clears its baseline.** Changing the account, local folder, remote path, or sync method no longer treats the old tree as deleted.
+- **To device and to cloud use the baseline.** Clock differences no longer re-transfer the whole library. Same-size edits are seen through ETag or a content hash, including files whose storage reports modification time 0.
+- **Idle to-cloud still checks the server** on a periodic full scan, so a remote edit is not skipped forever.
+- **Restore keeps folder access** for pairs the backup still uses. Conflict copies include the time and follow the size limit. Overview is ERROR if any enabled pair failed.
+- **Sync can only be started from the app.** Account “also delete the files” refuses an empty remote root and deletes only files this app has synced. An imported certificate is pinned to that leaf. Credential saves are flushed before they return. Old sync-log rows are pruned, and scans stop at a size budget.
+- **Build tools refreshed** (Android Gradle Plugin 9, Kotlin 2.4, current Jetpack). The app still targets Android 15 (API 35). Existing encrypted passwords are left as they are. Digest authentication stays on OkHttp 4.
+- Database upgrades from v1.1.3 automatically (schema 3).
 
 ### v1.1.3
 

@@ -43,6 +43,7 @@ private sealed class ActionResult {
     object DeletedLocal : ActionResult()
     object DeletedRemote : ActionResult()
     object Skipped : ActionResult()
+    object Remembered : ActionResult()
     data class ConflictResolved(val winningSide: SyncAction.Side) : ActionResult()
     object Failed : ActionResult()
 }
@@ -63,7 +64,9 @@ class TransferExecutor @Inject constructor(
     suspend fun executeAll(actions: List<SyncAction>, ctx: TransferContext): SyncOutcome {
         var directoryErrors = 0
         val (directoryActions, fileActions) = actions.partition {
-            it is SyncAction.CreateLocalDirectory || it is SyncAction.CreateRemoteDirectory
+            it is SyncAction.CreateLocalDirectory || it is SyncAction.CreateRemoteDirectory ||
+                it is SyncAction.DeleteLocalDirectory || it is SyncAction.DeleteRemoteDirectory ||
+                it is SyncAction.RememberDirectory || it is SyncAction.DropBaseline
         }
         diagnosticLogger.i(
             TAG,
@@ -71,8 +74,14 @@ class TransferExecutor @Inject constructor(
                 "${fileActions.size} file action(s), parallel=${ctx.maxParallelTransfers}",
         )
 
-        // Directories run sequentially, already ordered shallowest-first by the diff calculator.
-        for (action in directoryActions) {
+        val earlyDirectories = directoryActions.filter {
+            it is SyncAction.CreateLocalDirectory ||
+                it is SyncAction.CreateRemoteDirectory ||
+                it is SyncAction.RememberDirectory
+        }
+        // Creates run sequentially, already ordered shallowest-first by the diff calculator.
+        // Deletes run after file transfers so a removed directory is empty first.
+        for (action in earlyDirectories) {
             if (shouldAbortAtCheckpoint()) break
             diagnosticLogger.i(TAG, "Dir action start type=${action::class.simpleName} path=${action.relativePath}")
             val ok = runCatching { executeDirectoryAction(action, ctx) }.getOrElse {
@@ -93,27 +102,68 @@ class TransferExecutor @Inject constructor(
             return SyncOutcome(errors = directoryErrors, cancelled = true)
         }
 
+        val directoryDeletes = directoryActions.filter {
+            it is SyncAction.DeleteLocalDirectory || it is SyncAction.DeleteRemoteDirectory || it is SyncAction.DropBaseline
+        }.sortedByDescending { action -> action.relativePath.count { it == '/' } }
+
+        val plan = TransferPlanner.plan(
+            fileActions = fileActions,
+            localSizes = localSizes(fileActions, ctx),
+            remoteSizes = remoteSizes(fileActions),
+        )
+
         // Parallel multi‑100MB SAF reads + full-body staging used to OOM/hang with no further
         // log lines after "Executing transfers". Cap concurrency for heavy upload batches.
-        val parallel = effectiveFileParallelism(fileActions, ctx)
+        val parallel = effectiveFileParallelism(plan.primary, ctx)
         diagnosticLogger.i(
             TAG,
-            "File phase start pairId=${ctx.folderPairId}: ${fileActions.size} action(s), " +
-                "parallel=$parallel (configured=${ctx.maxParallelTransfers})",
+            "File phase start pairId=${ctx.folderPairId}: ${plan.primary.size} action(s), " +
+                "${plan.guardedDeletes.size} delete(s), parallel=$parallel (configured=${ctx.maxParallelTransfers})",
         )
-        Log.i(TAG, "File phase start pairId=${ctx.folderPairId} actions=${fileActions.size} parallel=$parallel")
+        Log.i(TAG, "File phase start pairId=${ctx.folderPairId} actions=${plan.primary.size} parallel=$parallel")
         val semaphore = Semaphore(parallel)
-        val results = coroutineScope {
-            fileActions.map { action ->
+        val succeededPaths = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        val primaryResults = coroutineScope {
+            plan.primary.map { action ->
                 async(Dispatchers.IO) {
                     semaphore.withPermit {
                         val result = executeFileActionWithRetry(action, ctx)
-                        // Live Overview counters (throttled in SyncProgress) — no Room write.
+                        if (result.isTransferSuccess()) succeededPaths.add(action.relativePath)
                         recordLiveProgress(result)
                         result
                     }
                 }
             }.awaitAll()
+        }
+        val deleteResults = coroutineScope {
+            plan.guardedDeletes.map { guarded ->
+                async(Dispatchers.IO) {
+                    semaphore.withPermit {
+                        val required = guarded.afterRelativePath
+                        if (required != null && required !in succeededPaths) {
+                            diagnosticLogger.w(
+                                TAG,
+                                "Skip delete path=${guarded.action.relativePath} because $required did not succeed",
+                            )
+                            return@withPermit ActionResult.Skipped
+                        }
+                        val result = executeFileActionWithRetry(guarded.action, ctx)
+                        recordLiveProgress(result)
+                        result
+                    }
+                }
+            }.awaitAll()
+        }
+        val results = primaryResults + deleteResults
+
+        for (action in directoryDeletes) {
+            if (shouldAbortAtCheckpoint()) break
+            val ok = runCatching { executeDirectoryAction(action, ctx) }.getOrElse {
+                if (it is CancellationException) throw it
+                diagnosticLogger.e(TAG, "Directory delete failed path=${action.relativePath}", it)
+                false
+            }
+            if (!ok) directoryErrors++
         }
 
         var uploaded = 0
@@ -134,6 +184,7 @@ class TransferExecutor @Inject constructor(
                     if (result.winningSide == SyncAction.Side.LOCAL) uploaded++ else downloaded++
                 }
                 ActionResult.Skipped -> skipped++
+                ActionResult.Remembered -> Unit
                 ActionResult.Failed -> errors++
             }
         }
@@ -161,6 +212,38 @@ class TransferExecutor @Inject constructor(
         is SyncAction.CreateLocalDirectory -> localFileIo.ensureDirectory(ctx.localRootUri, action.relativePath) != null
         is SyncAction.CreateRemoteDirectory ->
             ctx.client.createDirectory(RemotePaths.join(ctx.remoteRootPath, action.relativePath)).isSuccess
+        is SyncAction.RememberDirectory -> {
+            saveBaseline(ctx.folderPairId, action.relativePath, sizeBytes = 0L, mtime = 0L, isDirectory = true)
+            true
+        }
+        is SyncAction.DropBaseline -> {
+            syncFileStateRepository.deleteForPath(ctx.folderPairId, action.relativePath)
+            true
+        }
+        is SyncAction.DeleteLocalDirectory -> {
+            if (!localFileIo.isEmptyDirectory(ctx.localRootUri, action.relativePath)) {
+                true
+            } else if (localFileIo.delete(ctx.localRootUri, action.relativePath)) {
+                syncFileStateRepository.deleteForPath(ctx.folderPairId, action.relativePath)
+                true
+            } else {
+                false
+            }
+        }
+        is SyncAction.DeleteRemoteDirectory -> {
+            val remotePath = RemotePaths.join(ctx.remoteRootPath, action.remoteRelativePath)
+            val children = ctx.client.list(remotePath).getOrNull()
+            if (children == null) {
+                false
+            } else if (children.isNotEmpty()) {
+                true
+            } else {
+                val result = ctx.client.delete(remotePath)
+                val ok = result.isSuccess || result.exceptionOrNull() is WebDavException.NotFound
+                if (ok) syncFileStateRepository.deleteForPath(ctx.folderPairId, action.relativePath)
+                ok
+            }
+        }
         else -> true
     }
 
@@ -180,6 +263,7 @@ class TransferExecutor @Inject constructor(
                 diagnosticLogger.e(TAG, "File action threw path=${action.relativePath} attempt=$attempt/$maxAttempts", it)
                 ActionResult.Failed
             }
+            if (syncControl.shouldStop()) return ActionResult.Skipped
             val isRetryable = lastResult == ActionResult.Failed
             if (!isRetryable || attempt == maxAttempts) {
                 if (lastResult == ActionResult.Failed) {
@@ -195,11 +279,25 @@ class TransferExecutor @Inject constructor(
 
     private suspend fun executeFileAction(action: SyncAction, ctx: TransferContext): ActionResult = when (action) {
         is SyncAction.UploadFile -> uploadFile(action.relativePath, action.remoteRelativePath, ctx)
-        is SyncAction.DownloadFile -> downloadFile(action.relativePath, action.remoteRelativePath, action.remoteSizeBytes, ctx)
+        is SyncAction.DownloadFile -> downloadFile(
+            action.relativePath,
+            action.remoteRelativePath,
+            action.remoteSizeBytes,
+            ctx,
+            remoteEtag = action.remoteEtag,
+        )
         is SyncAction.DeleteLocalFile -> deleteLocalFile(action.relativePath, ctx)
         is SyncAction.DeleteRemoteFile -> deleteRemoteFile(action.relativePath, action.remoteRelativePath, ctx)
         is SyncAction.Conflict -> resolveConflict(action, ctx)
-        is SyncAction.CreateLocalDirectory, is SyncAction.CreateRemoteDirectory -> ActionResult.Skipped
+        is SyncAction.RememberInSync -> rememberInSync(action, ctx)
+        is SyncAction.MoveRemote -> moveRemote(action, ctx)
+        is SyncAction.CreateLocalDirectory,
+        is SyncAction.CreateRemoteDirectory,
+        is SyncAction.DeleteLocalDirectory,
+        is SyncAction.DeleteRemoteDirectory,
+        is SyncAction.RememberDirectory,
+        is SyncAction.DropBaseline,
+        -> ActionResult.Skipped
     }
 
     /** [remoteRelativePath] is the server's actual name; it can differ from [relativePath] (the local-safe canonical path). */
@@ -209,8 +307,8 @@ class TransferExecutor @Inject constructor(
             diagnosticLogger.w(TAG, "Upload skipped — local file not found path=$relativePath")
             return ActionResult.Failed
         }
-        if (local.sizeBytes <= 0L) {
-            diagnosticLogger.w(TAG, "Skip upload of empty local file path=$relativePath")
+        if (local.sizeBytes < 0L) {
+            diagnosticLogger.w(TAG, "Skip upload of unreadable local file path=$relativePath")
             return ActionResult.Skipped
         }
         if (ctx.uploadSizeLimitBytes != null && local.sizeBytes > ctx.uploadSizeLimitBytes) {
@@ -244,10 +342,10 @@ class TransferExecutor @Inject constructor(
         if (result.isFailure) {
             diagnosticLogger.w(TAG, "Upload failed path=$relativePath: ${result.exceptionOrNull()?.message}")
             Log.w(TAG, "Upload failed path=$relativePath: ${result.exceptionOrNull()?.message}")
-            // Mid-body timeout can leave a truncated object on the server. Delete it when it is
-            // smaller than the local source so the next pass retries a clean full PUT instead of
-            // entering the conflict / nested-copy cascade.
-            runCatching { deleteIncompleteRemoteAfterFailedUpload(remotePath, local.sizeBytes, ctx) }
+            // A cancelled PUT must not delete a copy that actually landed.
+            if (!syncControl.shouldStop()) {
+                runCatching { deleteIncompleteRemoteAfterFailedUpload(remotePath, local.sizeBytes, ctx) }
+            }
             return ActionResult.Failed
         }
 
@@ -262,12 +360,30 @@ class TransferExecutor @Inject constructor(
         }
 
         diagnosticLogger.i(TAG, "Uploaded path=$relativePath size=${after.sizeBytes}")
-        saveBaseline(ctx.folderPairId, relativePath, after.sizeBytes, after.lastModifiedEpochMillis)
+        val hash = if (result.getOrNull().isNullOrBlank() || after.lastModifiedEpochMillis == 0L) {
+            localFileIo.openInputStream(ctx.localRootUri, relativePath)?.use { ContentHash.sha256(it) }
+        } else {
+            null
+        }
+        saveBaseline(
+            ctx.folderPairId,
+            relativePath,
+            after.sizeBytes,
+            after.lastModifiedEpochMillis,
+            etag = result.getOrNull(),
+            hash = hash,
+        )
         return ActionResult.Uploaded
     }
 
     /** [remoteRelativePath] is the server's actual name; it can differ from [relativePath] (the local-safe canonical path). */
-    private suspend fun downloadFile(relativePath: String, remoteRelativePath: String, remoteSizeBytes: Long, ctx: TransferContext): ActionResult {
+    private suspend fun downloadFile(
+        relativePath: String,
+        remoteRelativePath: String,
+        remoteSizeBytes: Long,
+        ctx: TransferContext,
+        remoteEtag: String? = null,
+    ): ActionResult {
         val limit = ctx.downloadSizeLimitBytes
         // Enforce limit before streaming so oversized files never count as downloads and never
         // touch local storage (partial write + delete was easy to misread as a "Download").
@@ -315,7 +431,19 @@ class TransferExecutor @Inject constructor(
 
             val stat = localFileIo.statOrNull(ctx.localRootUri, relativePath) ?: return ActionResult.Failed
             diagnosticLogger.i(TAG, "Downloaded path=$relativePath size=${stat.sizeBytes}")
-            saveBaseline(ctx.folderPairId, relativePath, stat.sizeBytes, stat.lastModifiedEpochMillis)
+            val hash = if (remoteEtag.isNullOrBlank() || stat.lastModifiedEpochMillis == 0L) {
+                localFileIo.openInputStream(ctx.localRootUri, relativePath)?.use { ContentHash.sha256(it) }
+            } else {
+                null
+            }
+            saveBaseline(
+                ctx.folderPairId,
+                relativePath,
+                stat.sizeBytes,
+                stat.lastModifiedEpochMillis,
+                etag = remoteEtag,
+                hash = hash,
+            )
             baselined = true
             return ActionResult.Downloaded
         } catch (e: CancellationException) {
@@ -344,7 +472,11 @@ class TransferExecutor @Inject constructor(
 
 
     private suspend fun deleteLocalFile(relativePath: String, ctx: TransferContext): ActionResult {
-        localFileIo.delete(ctx.localRootUri, relativePath)
+        val deleted = localFileIo.delete(ctx.localRootUri, relativePath)
+        if (!deleted && localFileIo.statOrNull(ctx.localRootUri, relativePath) != null) {
+            diagnosticLogger.w(TAG, "Local delete failed path=$relativePath")
+            return ActionResult.Failed
+        }
         syncFileStateRepository.deleteForPath(ctx.folderPairId, relativePath)
         return ActionResult.DeletedLocal
     }
@@ -381,12 +513,7 @@ class TransferExecutor @Inject constructor(
                 localFileIo.openOutputStream(ctx.localRootUri, conflictCopyPath)?.use { out -> input.copyTo(out) } != null
             } ?: false
             // Local wins → remote's current content is the loser, download it aside as a local copy first.
-            SyncAction.Side.REMOTE -> {
-                val remotePath = RemotePaths.join(ctx.remoteRootPath, action.remoteRelativePath)
-                ctx.client.download(remotePath).getOrNull()?.use { input ->
-                    localFileIo.openOutputStream(ctx.localRootUri, conflictCopyPath)?.use { out -> input.copyTo(out) } != null
-                } ?: false
-            }
+            SyncAction.Side.REMOTE -> preserveRemoteWithinLimit(action, conflictCopyPath, ctx)
         }
         if (!preserved) {
             diagnosticLogger.w(TAG, "Conflict preserve failed path=$relativePath")
@@ -395,7 +522,13 @@ class TransferExecutor @Inject constructor(
 
         val applied = when (action.winningSide) {
             SyncAction.Side.LOCAL -> uploadFile(relativePath, action.remoteRelativePath, ctx)
-            SyncAction.Side.REMOTE -> downloadFile(relativePath, action.remoteRelativePath, remoteSizeBytes = 0L, ctx)
+            SyncAction.Side.REMOTE -> downloadFile(
+                relativePath,
+                action.remoteRelativePath,
+                remoteSizeBytes = action.remoteSizeBytes,
+                ctx,
+                remoteEtag = action.remoteEtag,
+            )
         }
         if (applied is ActionResult.Failed) {
             return ActionResult.Failed
@@ -415,15 +548,131 @@ class TransferExecutor @Inject constructor(
         return ActionResult.ConflictResolved(action.winningSide)
     }
 
-    private suspend fun saveBaseline(folderPairId: Long, relativePath: String, sizeBytes: Long, mtime: Long) {
+    private suspend fun saveBaseline(
+        folderPairId: Long,
+        relativePath: String,
+        sizeBytes: Long,
+        mtime: Long,
+        etag: String? = null,
+        hash: String? = null,
+        isDirectory: Boolean = false,
+    ) {
         syncFileStateRepository.upsert(
             SyncFileStateEntity(
                 folderPairId = folderPairId,
                 relativePath = relativePath,
                 lastSyncedMtime = mtime,
                 lastSyncedSize = sizeBytes,
+                lastSyncedHash = hash,
+                lastSyncedEtag = etag,
+                isDirectory = isDirectory,
             ),
         )
+    }
+
+    private suspend fun rememberInSync(action: SyncAction.RememberInSync, ctx: TransferContext): ActionResult {
+        val hash = if (action.remoteEtag.isNullOrBlank() || action.lastModifiedEpochMillis == 0L) {
+            localFileIo.openInputStream(ctx.localRootUri, action.relativePath)?.use { ContentHash.sha256(it) }
+        } else {
+            null
+        }
+        saveBaseline(
+            ctx.folderPairId,
+            action.relativePath,
+            action.sizeBytes,
+            action.lastModifiedEpochMillis,
+            etag = action.remoteEtag,
+            hash = hash,
+        )
+        return ActionResult.Remembered
+    }
+
+    private suspend fun moveRemote(action: SyncAction.MoveRemote, ctx: TransferContext): ActionResult {
+        val from = RemotePaths.join(ctx.remoteRootPath, action.remoteFromRelativePath)
+        val to = RemotePaths.join(ctx.remoteRootPath, action.remoteToRelativePath)
+        val moved = ctx.client.move(from, to)
+        if (moved.isSuccess) {
+            val local = localFileIo.statOrNull(ctx.localRootUri, action.relativePath)
+            if (local != null) {
+                saveBaseline(ctx.folderPairId, action.relativePath, local.sizeBytes, local.lastModifiedEpochMillis)
+            }
+            syncFileStateRepository.deleteForPath(ctx.folderPairId, action.fromRelativePath)
+            diagnosticLogger.i(TAG, "Moved remote ${action.fromRelativePath} -> ${action.relativePath}")
+            return ActionResult.Uploaded
+        }
+        diagnosticLogger.w(TAG, "MOVE failed ${action.fromRelativePath}: ${moved.exceptionOrNull()?.message}")
+        val uploaded = uploadFile(action.relativePath, action.remoteToRelativePath, ctx)
+        if (uploaded != ActionResult.Uploaded) return uploaded
+        val deleted = deleteRemoteFile(action.fromRelativePath, action.remoteFromRelativePath, ctx)
+        if (deleted == ActionResult.Failed) {
+            diagnosticLogger.w(TAG, "Rename uploaded new path but old remote remains ${action.fromRelativePath}")
+        }
+        return ActionResult.Uploaded
+    }
+
+    /** Downloads the losing remote side under the same size limit as a normal download. */
+    private suspend fun preserveRemoteWithinLimit(
+        action: SyncAction.Conflict,
+        conflictCopyPath: String,
+        ctx: TransferContext,
+    ): Boolean {
+        val limit = ctx.downloadSizeLimitBytes
+        if (limit != null && action.remoteSizeBytes > 0L && action.remoteSizeBytes > limit) {
+            diagnosticLogger.i(TAG, "Skip conflict preserve (size limit) path=${action.relativePath}")
+            return false
+        }
+        val remotePath = RemotePaths.join(ctx.remoteRootPath, action.remoteRelativePath)
+        val stream = ctx.client.download(remotePath).getOrNull() ?: return false
+        var exceeded = false
+        val wrote = stream.use { input ->
+            localFileIo.openOutputStream(ctx.localRootUri, conflictCopyPath)?.use { out ->
+                if (limit != null) {
+                    exceeded = copyLimited(input, out, limit)
+                    !exceeded
+                } else {
+                    input.copyTo(out)
+                    true
+                }
+            } ?: false
+        }
+        if (!wrote || exceeded) {
+            localFileIo.delete(ctx.localRootUri, conflictCopyPath)
+            return false
+        }
+        return true
+    }
+
+    private fun localSizes(actions: List<SyncAction>, ctx: TransferContext): Map<String, Long> {
+        val sizes = mutableMapOf<String, Long>()
+        for (action in actions) {
+            when (action) {
+                is SyncAction.UploadFile -> {
+                    val size = localFileIo.statOrNull(ctx.localRootUri, action.relativePath)?.sizeBytes
+                    if (size != null) sizes[action.relativePath] = size
+                }
+                is SyncAction.DeleteLocalFile -> if (action.sizeBytes >= 0) sizes[action.relativePath] = action.sizeBytes
+                else -> Unit
+            }
+        }
+        return sizes
+    }
+
+    private fun remoteSizes(actions: List<SyncAction>): Map<String, Long> {
+        val sizes = mutableMapOf<String, Long>()
+        for (action in actions) {
+            when (action) {
+                is SyncAction.DownloadFile -> sizes[action.relativePath] = action.remoteSizeBytes
+                is SyncAction.DeleteRemoteFile -> if (action.sizeBytes >= 0) sizes[action.relativePath] = action.sizeBytes
+                else -> Unit
+            }
+        }
+        return sizes
+    }
+
+    private fun ActionResult.isTransferSuccess(): Boolean = when (this) {
+        ActionResult.Uploaded, ActionResult.Downloaded -> true
+        is ActionResult.ConflictResolved -> true
+        else -> false
     }
 
     /** Pause/cancel checkpoint: await resume, then true if the worker should stop. */
@@ -446,7 +695,7 @@ class TransferExecutor @Inject constructor(
                     syncProgress.recordDownloaded()
                 }
             }
-            ActionResult.Skipped, ActionResult.Failed -> Unit
+            ActionResult.Skipped, ActionResult.Remembered, ActionResult.Failed -> Unit
         }
     }
 

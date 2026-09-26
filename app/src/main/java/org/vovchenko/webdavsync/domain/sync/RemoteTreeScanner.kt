@@ -1,6 +1,7 @@
 package org.vovchenko.webdavsync.domain.sync
 
 import org.vovchenko.webdavsync.data.local.saf.PathExclusion
+import org.vovchenko.webdavsync.data.local.saf.PathFilters
 import org.vovchenko.webdavsync.data.remote.DavHref
 import org.vovchenko.webdavsync.data.remote.WebDavClient
 import org.vovchenko.webdavsync.data.remote.WebDavPathSafety
@@ -23,9 +24,12 @@ class RemoteTreeScanner @Inject constructor() {
         client: WebDavClient,
         rootPath: String,
         excludedSubfolders: List<String>,
+        excludeHiddenFiles: Boolean = false,
     ): Result<List<RemoteFileEntry>> {
         val results = mutableListOf<RemoteFileEntry>()
-        val failure = walk(client, rootPath, relativePrefix = "", excludedSubfolders, results)
+        val failure = walk(
+            client, rootPath, relativePrefix = "", excludedSubfolders, excludeHiddenFiles, depth = 1, results,
+        )
         return failure?.let { Result.failure(it) } ?: Result.success(results)
     }
 
@@ -35,17 +39,25 @@ class RemoteTreeScanner @Inject constructor() {
         remotePath: String,
         relativePrefix: String,
         excludedSubfolders: List<String>,
+        excludeHiddenFiles: Boolean,
+        depth: Int,
         out: MutableList<RemoteFileEntry>,
     ): Throwable? {
+        val limit = runCatching { ScanLimits.check(depth, out.size) }.exceptionOrNull()
+        if (limit != null) return limit
         val children = client.list(remotePath).getOrElse { return it }
         val parentNormalized = WebDavPathSafety.sanitize(remotePath)
 
         for (resource in children) {
             // Decode last segment so "test%201" / "test 1" both become "test 1".
             val name = DavHref.childName(resource.path) ?: continue
+            if (excludeHiddenFiles && name.startsWith(".")) continue
+            if (PathFilters.isTemporary(name)) continue
 
             val relativePath = RelativePaths.joinRelative(relativePrefix, name)
             if (PathExclusion.isExcluded(relativePath, excludedSubfolders)) continue
+            val capped = runCatching { ScanLimits.check(depth, out.size + 1) }.exceptionOrNull()
+            if (capped != null) return capped
 
             val childRemotePath = RemotePaths.join(remotePath, name)
             // Defensive: never re-enter the same collection (encoding mismatches can still leak self).
@@ -62,7 +74,9 @@ class RemoteTreeScanner @Inject constructor() {
             )
 
             if (resource.isDirectory) {
-                val failure = walk(client, childRemotePath, relativePath, excludedSubfolders, out)
+                val failure = walk(
+                    client, childRemotePath, relativePath, excludedSubfolders, excludeHiddenFiles, depth + 1, out,
+                )
                 if (failure != null) return failure
             }
         }

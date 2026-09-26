@@ -24,7 +24,7 @@ class ConflictResolverTest {
             losingSide = SyncAction.Side.LOCAL,
             nowMillis = millisFor(2026, 8, 6),
         )
-        assertEquals("Photos/beach (conflicted copy, device, 2026-08-06).jpg", result)
+        assertEquals("Photos/beach (conflicted copy, device, 2026-08-06 00:00:00).jpg", result)
     }
 
     @Test
@@ -34,7 +34,7 @@ class ConflictResolverTest {
             losingSide = SyncAction.Side.REMOTE,
             nowMillis = millisFor(2026, 8, 6),
         )
-        assertEquals("notes (conflicted copy, cloud, 2026-08-06)", result)
+        assertEquals("notes (conflicted copy, cloud, 2026-08-06 00:00:00)", result)
     }
 
     @Test
@@ -44,6 +44,6 @@ class ConflictResolverTest {
             losingSide = SyncAction.Side.LOCAL,
             nowMillis = millisFor(2026, 1, 1),
         )
-        assertEquals("readme (conflicted copy, device, 2026-01-01).txt", result)
+        assertEquals("readme (conflicted copy, device, 2026-01-01 00:00:00).txt", result)
     }
 }

@@ -12,6 +12,8 @@ import org.vovchenko.webdavsync.data.local.diagnostics.DiagnosticLogger
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
 import org.vovchenko.webdavsync.data.repository.SyncLogRepository
 import org.vovchenko.webdavsync.data.repository.WebDavAccountRepository
+import org.vovchenko.webdavsync.data.remote.WebDavClientFactory
+import org.vovchenko.webdavsync.data.remote.WebDavClientSession
 import org.vovchenko.webdavsync.data.repository.WebDavConnectionRepository
 import org.vovchenko.webdavsync.domain.sync.SyncEngine
 import org.vovchenko.webdavsync.sync.FolderChangeCoordinator
@@ -36,6 +38,7 @@ class SyncWorker @AssistedInject constructor(
     private val diagnosticLogger: DiagnosticLogger,
     private val folderChangeCoordinator: FolderChangeCoordinator,
     private val syncScheduler: SyncScheduler,
+    private val clientFactory: WebDavClientFactory,
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
@@ -44,7 +47,12 @@ class SyncWorker @AssistedInject constructor(
         // Two concurrent downloads of the same path make SAF createFile auto-rename to
         // "file (1).jpg", which the next two-way pass then uploads as a new remote file.
         if (!syncControl.tryBeginSession()) {
-            syncControl.requestFollowUpSync()
+            val targets = targetPairIds()
+            if (targets == null) {
+                syncControl.requestFollowUpSync(null)
+            } else {
+                targets.forEach { syncControl.requestFollowUpSync(it) }
+            }
             diagnosticLogger.i(
                 TAG,
                 "Worker skipped (session already active) targetPairId=${targetId ?: "all"} — follow-up requested",
@@ -55,15 +63,17 @@ class SyncWorker @AssistedInject constructor(
         syncProgress.beginPass()
         diagnosticLogger.i(TAG, "Worker start targetPairId=${targetId ?: "all"} runAttempt=$runAttemptCount")
 
+        val clients = clientFactory.openSession()
         return try {
-            runSyncPass(targetId)
+            runSyncPass(clients)
         } finally {
+            clients.close()
             diagnosticLogger.i(TAG, "Worker finished cancelled=${syncControl.isCancelled} stopped=$isStopped")
             val followUp = syncControl.endSession()
             syncProgress.endPass()
             // Coalesce mid-pass local changes into one follow-up instead of REPLACE mid-download.
-            if (followUp && !isStopped) {
-                syncScheduler.enqueueFollowUpIfNeeded(requested = true)
+            if (!followUp.isEmpty && !isStopped) {
+                syncScheduler.enqueueFollowUpIfNeeded(followUp)
             }
             // forceIdle: WorkManager still marks this worker RUNNING until doWork returns, so a
             // plain refresh would paint "Sync in process..." forever after ERROR while Overview
@@ -72,11 +82,11 @@ class SyncWorker @AssistedInject constructor(
         }
     }
 
-    private suspend fun runSyncPass(targetId: Long?): Result {
-        val pairs = if (targetId != null) {
-            listOfNotNull(folderPairRepository.observeById(targetId).first())
-        } else {
-            folderPairRepository.getEnabled()
+    private suspend fun runSyncPass(clients: WebDavClientSession): Result {
+        val explicitIds = targetPairIds()
+        val pairs = when {
+            explicitIds != null -> explicitIds.mapNotNull { folderPairRepository.observeById(it).first() }
+            else -> folderPairRepository.getEnabled()
         }.filter { it.enabled }
 
         diagnosticLogger.i(TAG, "Will sync ${pairs.size} folder pair(s)")
@@ -99,7 +109,7 @@ class SyncWorker @AssistedInject constructor(
             syncControl.awaitWhilePaused { isStopped }
             if (shouldAbort()) break
 
-            val outcome = syncEngine.sync(pair.id) {
+            val outcome = syncEngine.sync(pair.id, clients) {
                 setForeground(
                     notificationHelper.foregroundInfo(
                         applicationContext.getString(R.string.sync_notification_syncing, pair.name),
@@ -147,12 +157,15 @@ class SyncWorker @AssistedInject constructor(
 
         // Avoid instant-upload poll treating post-sync local tree changes as a new user edit.
         folderChangeCoordinator.reseedAfterSync(syncedPairIds)
+        syncLogRepository.pruneOlderThan(
+            System.currentTimeMillis() - java.util.concurrent.TimeUnit.DAYS.toMillis(LOG_RETENTION_DAYS),
+        )
 
         // Quota PROPFIND is wasted on an idle no-op (nothing transferred).
         if (sessionHadWork) {
             for (accountId in accountIds) {
                 val account = accountRepository.observeById(accountId).first() ?: continue
-                connectionRepository.refreshQuota(account).onFailure {
+                connectionRepository.refreshQuota(account, clients).onFailure {
                     diagnosticLogger.w(TAG, "Quota refresh failed accountId=$accountId: ${it.message}")
                 }
             }
@@ -180,10 +193,20 @@ class SyncWorker @AssistedInject constructor(
 
     private fun shouldAbort(): Boolean = isStopped || syncControl.shouldStop()
 
+    /** Null means every enabled pair. A set means only those ids. */
+    private fun targetPairIds(): Set<Long>? {
+        val many = inputData.getLongArray(KEY_FOLDER_PAIR_IDS)
+        if (many != null && many.isNotEmpty()) return many.toSet()
+        val one = inputData.getLong(KEY_FOLDER_PAIR_ID, -1L)
+        return if (one >= 0L) setOf(one) else null
+    }
+
     companion object {
         private const val TAG = "SyncWorker"
         const val UNIQUE_PERIODIC_WORK_NAME = "periodic_sync"
         const val UNIQUE_MANUAL_WORK_NAME = "manual_sync"
         const val KEY_FOLDER_PAIR_ID = "folder_pair_id"
+        const val KEY_FOLDER_PAIR_IDS = "folder_pair_ids"
+        private const val LOG_RETENTION_DAYS = 90L
     }
 }

@@ -220,6 +220,10 @@ fun AddEditFolderPairScreen(
 
             ToggleRow(label = "Enabled", checked = form.enabled, onCheckedChange = viewModel::setEnabled)
 
+            if (uiState.error != null) {
+                Text(text = uiState.error!!, color = MaterialTheme.colorScheme.error)
+            }
+
             Button(onClick = viewModel::save, enabled = form.canSave, modifier = Modifier.fillMaxWidth()) {
                 Text("Save")
             }

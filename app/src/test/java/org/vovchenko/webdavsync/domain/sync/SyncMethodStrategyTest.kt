@@ -8,7 +8,8 @@ import org.vovchenko.webdavsync.data.local.saf.LocalFileEntry
 import org.vovchenko.webdavsync.domain.model.SyncAction
 
 private fun local(size: Long, mtime: Long) = LocalFileEntry("file.txt", isDirectory = false, sizeBytes = size, lastModifiedEpochMillis = mtime)
-private fun remote(size: Long, mtime: Long) = RemoteFileEntry("file.txt", isDirectory = false, sizeBytes = size, lastModifiedEpochMillis = mtime, etag = null)
+private fun remote(size: Long, mtime: Long, etag: String? = null) =
+    RemoteFileEntry("file.txt", isDirectory = false, sizeBytes = size, lastModifiedEpochMillis = mtime, etag = etag)
 private fun baseline(size: Long, mtime: Long) = SyncFileStateEntity(folderPairId = 1, relativePath = "file.txt", lastSyncedMtime = mtime, lastSyncedSize = size)
 
 class SyncMethodStrategyTest {
@@ -40,7 +41,7 @@ class SyncMethodStrategyTest {
     fun `two-way local delete propagates as remote delete`() {
         val base = baseline(100, 1000)
         val action = twoWay.computeFileAction("file.txt", null, remote(100, 1000), base)
-        assertEquals(SyncAction.DeleteRemoteFile("file.txt"), action)
+        assertEquals(SyncAction.DeleteRemoteFile("file.txt", sizeBytes = 100), action)
     }
 
     @Test
@@ -49,7 +50,7 @@ class SyncMethodStrategyTest {
         // that must not be treated as a remote edit (which would re-download the file).
         val base = baseline(100, 1000)
         val action = twoWay.computeFileAction("file.txt", null, remote(100, 99_999), base)
-        assertEquals(SyncAction.DeleteRemoteFile("file.txt"), action)
+        assertEquals(SyncAction.DeleteRemoteFile("file.txt", sizeBytes = 100), action)
     }
 
     @Test
@@ -64,35 +65,57 @@ class SyncMethodStrategyTest {
     fun `two-way both sides modified differently is a true conflict`() {
         val base = baseline(100, 1000)
         val action = twoWay.computeFileAction("file.txt", local(150, 9000), remote(200, 5000), base)
-        assertEquals(SyncAction.Conflict("file.txt", SyncAction.Side.LOCAL), action)
+        assertEquals(
+            SyncAction.Conflict(
+                "file.txt",
+                SyncAction.Side.LOCAL,
+                localSizeBytes = 150,
+                remoteSizeBytes = 200,
+            ),
+            action,
+        )
     }
 
     @Test
-    fun `two-way both sides converge to the same content is not a conflict`() {
+    fun `two-way both sides converge to the same content records a fresh baseline`() {
         val base = baseline(100, 1000)
         val action = twoWay.computeFileAction("file.txt", local(200, 5000), remote(200, 5000), base)
-        assertNull(action)
+        assertEquals(SyncAction.RememberInSync("file.txt", sizeBytes = 200, lastModifiedEpochMillis = 5000), action)
     }
 
     @Test
-    fun `two-way both new with same size but different mtime is not a conflict`() {
+    fun `two-way both new with same size but different mtime seeds a baseline`() {
         // After download, SAF mtime is "now" while remote keeps original Last-Modified.
         val action = twoWay.computeFileAction("file.txt", local(200, 99_999), remote(200, 1000), null)
-        assertNull(action)
+        assertEquals(SyncAction.RememberInSync("file.txt", sizeBytes = 200, lastModifiedEpochMillis = 99_999), action)
     }
 
     @Test
-    fun `two-way both new with different sizes repairs incomplete put by uploading larger local`() {
-        // Timed-out PUT leaves a partial remote; must not mint a conflicted copy.
-        // Helpers hardcode relativePath "file.txt" — keep the action path consistent.
+    fun `two-way both new with different sizes is a conflict when nothing was synced yet`() {
         val action = twoWay.computeFileAction("file.txt", local(4_000_000, 9000), remote(900_000, 8000), null)
+        assertEquals(
+            SyncAction.Conflict("file.txt", SyncAction.Side.LOCAL, localSizeBytes = 4_000_000, remoteSizeBytes = 900_000),
+            action,
+        )
+    }
+
+    @Test
+    fun `two-way baseline matching the larger side repairs a truncated remote`() {
+        val base = baseline(4_000_000, 1000)
+        val action = twoWay.computeFileAction("file.txt", local(4_000_000, 9000), remote(900_000, 8000), base)
         assertEquals(SyncAction.UploadFile("file.txt"), action)
     }
 
     @Test
-    fun `two-way both new with larger remote repairs incomplete local by downloading`() {
-        val action = twoWay.computeFileAction("file.txt", local(500_000, 9000), remote(4_000_000, 8000), null)
-        assertEquals(SyncAction.DownloadFile("file.txt", remoteSizeBytes = 4_000_000), action)
+    fun `two-way etag change with the same size is a remote modification`() {
+        val base = baseline(100, 1000).copy(lastSyncedEtag = "\"v1\"")
+        val action = twoWay.computeFileAction(
+            "file.txt",
+            local(100, 1000),
+            remote(100, 1000, etag = "\"v2\""),
+            base,
+        )
+        assertEquals(SyncAction.DownloadFile("file.txt", remoteSizeBytes = 100, remoteEtag = "\"v2\""), action)
     }
 
     @Test
@@ -133,7 +156,14 @@ class SyncMethodStrategyTest {
     fun `to-device deletes local file removed remotely`() {
         val base = baseline(100, 1000)
         val action = toDevice.computeFileAction("file.txt", local(100, 1000), null, base)
-        assertEquals(SyncAction.DeleteLocalFile("file.txt"), action)
+        assertEquals(SyncAction.DeleteLocalFile("file.txt", sizeBytes = 100), action)
+    }
+
+    @Test
+    fun `to-device equal size with distant mtimes is in sync once a baseline exists`() {
+        val base = baseline(100, 50_000)
+        val action = toDevice.computeFileAction("file.txt", local(100, 50_000), remote(100, 1_000), base)
+        assertNull(action)
     }
 
     @Test
@@ -152,6 +182,13 @@ class SyncMethodStrategyTest {
     fun `to-cloud deletes remote file removed locally`() {
         val base = baseline(100, 1000)
         val action = toCloud.computeFileAction("file.txt", null, remote(100, 1000), base)
-        assertEquals(SyncAction.DeleteRemoteFile("file.txt"), action)
+        assertEquals(SyncAction.DeleteRemoteFile("file.txt", sizeBytes = 100), action)
+    }
+
+    @Test
+    fun `to-cloud equal size with distant mtimes is in sync once a baseline exists`() {
+        val base = baseline(100, 1000)
+        val action = toCloud.computeFileAction("file.txt", local(100, 1000), remote(100, 90_000), base)
+        assertNull(action)
     }
 }

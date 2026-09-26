@@ -11,11 +11,19 @@ import org.vovchenko.webdavsync.data.remote.trust.TrustedCertTrustManagerFactory
 import java.io.File
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
+import javax.inject.Singleton
 
-/** Builds a per-account [WebDavClient] with the account's auth scheme and trusted certificate wired in. */
+/**
+ * Builds a per-account [WebDavClient] with the account's auth scheme and trusted certificate wired in.
+ * [openSession] reuses one client per account for a sync pass. Callers of [create] close the client.
+ */
+@Singleton
 class WebDavClientFactory @Inject constructor(
     private val context: Context,
+    private val inFlightCalls: InFlightCallRegistry,
 ) {
+
+    fun openSession(): WebDavClientSession = WebDavClientSession(this)
 
     fun create(
         baseUrl: String,
@@ -23,9 +31,24 @@ class WebDavClientFactory @Inject constructor(
         credentials: WebDavCredentials,
         trustedCertificateBytes: ByteArray?,
     ): WebDavClient {
-        val okHttpClient = buildOkHttpClient(authScheme, credentials, trustedCertificateBytes)
+        val bodyClient = buildOkHttpClient(authScheme, credentials, trustedCertificateBytes)
+        val metaClient = bodyClient.newBuilder()
+            .readTimeout(METADATA_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .writeTimeout(METADATA_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .callTimeout(METADATA_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .build()
         val uploadCache = File(context.cacheDir, "webdav-uploads")
-        return SardineWebDavClient(okHttpClient, baseUrl, uploadCache)
+        return SardineWebDavClient(bodyClient, metaClient, baseUrl, uploadCache)
+    }
+
+    companion object {
+        const val METADATA_TIMEOUT_SECONDS = 60L
+
+        fun shutdown(client: OkHttpClient) {
+            client.connectionPool.evictAll()
+            client.dispatcher.cancelAll()
+            client.dispatcher.executorService.shutdown()
+        }
     }
 
     /** Builds a bare client (no auth applied yet) for the auth-scheme detection probe. */
@@ -58,9 +81,41 @@ class WebDavClientFactory @Inject constructor(
         // 30 minutes per read/write window is enough for large files on slow links.
         .readTimeout(30, TimeUnit.MINUTES)
         .writeTimeout(30, TimeUnit.MINUTES)
-        .callTimeout(0, TimeUnit.SECONDS) // whole-call limit still unbounded; per-window timeouts apply
+        // Bounds a trickle that never goes idle long enough to trip the read/write window.
+        .callTimeout(6, TimeUnit.HOURS)
+        .addInterceptor { chain ->
+            val call = chain.call()
+            inFlightCalls.register(call)
+            try {
+                chain.proceed(chain.request())
+            } finally {
+                inFlightCalls.unregister(call)
+            }
+        }
         // Security audit finding #6: don't silently follow a redirect to another host/scheme —
         // that could otherwise leak Basic/Digest credentials to an attacker-controlled origin.
         .followRedirects(false)
         .followSslRedirects(false)
+}
+
+/** One OkHttp client per account for the duration of a sync pass. [close] drops idle sockets. */
+class WebDavClientSession(
+    private val factory: WebDavClientFactory,
+) : java.io.Closeable {
+    private val clients = LinkedHashMap<Long, WebDavClient>()
+
+    fun clientFor(
+        accountId: Long,
+        baseUrl: String,
+        authScheme: AuthScheme,
+        credentials: WebDavCredentials,
+        trustedCertificateBytes: ByteArray?,
+    ): WebDavClient = clients.getOrPut(accountId) {
+        factory.create(baseUrl, authScheme, credentials, trustedCertificateBytes)
+    }
+
+    override fun close() {
+        clients.values.forEach { client -> runCatching { client.close() } }
+        clients.clear()
+    }
 }

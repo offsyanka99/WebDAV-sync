@@ -28,4 +28,8 @@ data class SyncFileStateEntity(
     val lastSyncedMtime: Long,
     val lastSyncedSize: Long,
     val lastSyncedHash: String? = null,
+    /** Server ETag from PROPFIND or the PUT response. Null when the server does not send one. */
+    val lastSyncedEtag: String? = null,
+    /** True for directory rows. File rows stay false. */
+    val isDirectory: Boolean = false,
 )

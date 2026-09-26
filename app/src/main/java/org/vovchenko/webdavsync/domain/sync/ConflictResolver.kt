@@ -1,8 +1,8 @@
 package org.vovchenko.webdavsync.domain.sync
 
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import org.vovchenko.webdavsync.domain.model.SyncAction
 
@@ -18,7 +18,7 @@ class ConflictResolver @Inject constructor() {
             SyncAction.Side.LOCAL -> "device"
             SyncAction.Side.REMOTE -> "cloud"
         }
-        val dateStr = DATE_FORMAT.format(Date(nowMillis))
+        val dateStr = DATE_FORMAT.format(Instant.ofEpochMilli(nowMillis))
         val dir = relativePath.substringBeforeLast('/', "")
         val fileName = relativePath.substringAfterLast('/')
         val extension = fileName.substringAfterLast('.', "")
@@ -32,10 +32,7 @@ class ConflictResolver @Inject constructor() {
     }
 
     private companion object {
-        val DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
-            // Deterministic regardless of device timezone (also fixes ConflictResolverTest, which
-            // previously only passed by coincidence on UTC-timezone machines).
-            timeZone = java.util.TimeZone.getTimeZone("UTC")
-        }
+        val DATE_FORMAT: DateTimeFormatter =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneOffset.UTC)
     }
 }

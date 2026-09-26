@@ -25,23 +25,123 @@ class IdleSyncPolicyTest {
 
     @Test
     fun `to-cloud skips remote only after an OK pass with the same fingerprint`() {
+        val recent = 1_000L
         assertTrue(
-            IdleSyncPolicy.canSkipRemoteScan(SyncMethod.TO_CLOUD, "OK", lastFingerprint = 42L, currentFingerprint = 42L),
+            IdleSyncPolicy.canSkipRemoteScan(
+                SyncMethod.TO_CLOUD, "OK", lastFingerprint = 42L, currentFingerprint = 42L,
+                lastRemoteScanAt = recent, nowMillis = recent + 60_000, mtimeReliable = true,
+            ),
         )
         assertFalse(
-            IdleSyncPolicy.canSkipRemoteScan(SyncMethod.TO_CLOUD, "OK", lastFingerprint = 42L, currentFingerprint = 43L),
+            IdleSyncPolicy.canSkipRemoteScan(
+                SyncMethod.TO_CLOUD, "OK", lastFingerprint = 42L, currentFingerprint = 43L,
+                lastRemoteScanAt = recent, nowMillis = recent, mtimeReliable = true,
+            ),
         )
         assertFalse(
-            IdleSyncPolicy.canSkipRemoteScan(SyncMethod.TO_CLOUD, "OK", lastFingerprint = null, currentFingerprint = 42L),
+            IdleSyncPolicy.canSkipRemoteScan(
+                SyncMethod.TO_CLOUD, "OK", lastFingerprint = null, currentFingerprint = 42L,
+                lastRemoteScanAt = recent, nowMillis = recent, mtimeReliable = true,
+            ),
         )
         assertFalse(
-            IdleSyncPolicy.canSkipRemoteScan(SyncMethod.TO_CLOUD, "ERROR", lastFingerprint = 42L, currentFingerprint = 42L),
+            IdleSyncPolicy.canSkipRemoteScan(
+                SyncMethod.TO_CLOUD, "ERROR", lastFingerprint = 42L, currentFingerprint = 42L,
+                lastRemoteScanAt = recent, nowMillis = recent, mtimeReliable = true,
+            ),
+        )
+        assertTrue(
+            IdleSyncPolicy.canSkipRemoteScan(
+                SyncMethod.TWO_WAY, "OK", lastFingerprint = 42L, currentFingerprint = 42L,
+                lastRemoteScanAt = recent, nowMillis = recent, mtimeReliable = true,
+            ),
+        )
+        assertTrue(
+            IdleSyncPolicy.canSkipRemoteScan(
+                SyncMethod.TO_DEVICE, "OK", lastFingerprint = 42L, currentFingerprint = 42L,
+                lastRemoteScanAt = recent, nowMillis = recent, mtimeReliable = true,
+            ),
         )
         assertFalse(
-            IdleSyncPolicy.canSkipRemoteScan(SyncMethod.TWO_WAY, "OK", lastFingerprint = 42L, currentFingerprint = 42L),
+            IdleSyncPolicy.canSkipRemoteScan(
+                SyncMethod.TO_CLOUD, "OK", lastFingerprint = 42L, currentFingerprint = 42L,
+                lastRemoteScanAt = null, nowMillis = recent, mtimeReliable = true,
+            ),
         )
         assertFalse(
-            IdleSyncPolicy.canSkipRemoteScan(SyncMethod.TO_DEVICE, "OK", lastFingerprint = 42L, currentFingerprint = 42L),
+            IdleSyncPolicy.canSkipRemoteScan(
+                SyncMethod.TO_CLOUD, "OK", lastFingerprint = 42L, currentFingerprint = 42L,
+                lastRemoteScanAt = recent,
+                nowMillis = recent + IdleSyncPolicy.FULL_REMOTE_SCAN_MAX_AGE_MS,
+                mtimeReliable = true,
+            ),
+        )
+        assertFalse(
+            IdleSyncPolicy.canSkipRemoteScan(
+                SyncMethod.TO_CLOUD, "OK", lastFingerprint = 42L, currentFingerprint = 42L,
+                lastRemoteScanAt = recent, nowMillis = recent, mtimeReliable = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `fingerprint ignores list order`() {
+        val a = file("b.txt", size = 2, mtime = 20)
+        val b = file("a.txt", size = 1, mtime = 10)
+        assertEquals(
+            IdleSyncPolicy.fingerprint(listOf(a, b)),
+            IdleSyncPolicy.fingerprint(listOf(b, a)),
+        )
+    }
+
+    @Test
+    fun `full local walk is skipped only while the cheap snapshot and both caps are fresh`() {
+        val now = 10_000L
+        assertTrue(
+            IdleSyncPolicy.canSkipFullLocalWalk(
+                lastCheapFingerprint = 7L,
+                currentCheapFingerprint = 7L,
+                lastFullLocalScanAt = now - 60_000,
+                nowMillis = now,
+                lastLocalFingerprint = 42L,
+                lastSyncStatus = "OK",
+                lastRemoteScanAt = now - 60_000,
+                mtimeKnownReliable = true,
+            ),
+        )
+        assertFalse(
+            IdleSyncPolicy.canSkipFullLocalWalk(
+                lastCheapFingerprint = 7L,
+                currentCheapFingerprint = 8L,
+                lastFullLocalScanAt = now,
+                nowMillis = now,
+                lastLocalFingerprint = 42L,
+                lastSyncStatus = "OK",
+                lastRemoteScanAt = now,
+                mtimeKnownReliable = true,
+            ),
+        )
+        assertFalse(
+            IdleSyncPolicy.canSkipFullLocalWalk(
+                lastCheapFingerprint = 7L,
+                currentCheapFingerprint = 7L,
+                lastFullLocalScanAt = now - IdleSyncPolicy.FULL_LOCAL_WALK_MAX_AGE_MS,
+                nowMillis = now,
+                lastLocalFingerprint = 42L,
+                lastSyncStatus = "OK",
+                lastRemoteScanAt = now,
+                mtimeKnownReliable = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `content hash sweep stays fresh for a day`() {
+        val now = 5_000L
+        assertTrue(IdleSyncPolicy.hashSweepIsFresh(now - 60_000, now))
+        assertFalse(IdleSyncPolicy.hashSweepIsFresh(null, now))
+        assertFalse(
+            IdleSyncPolicy.hashSweepIsFresh(now - IdleSyncPolicy.CONTENT_HASH_SWEEP_MAX_AGE_MS, now),
         )
     }
 

@@ -86,6 +86,23 @@ class SyncOverviewMetricsTest {
     }
 
     @Test
+    fun `any enabled pair in ERROR wins over a newer OK pair`() {
+        val pairs = listOf(
+            FolderPairEntity(
+                id = 1, accountId = 1, name = "failed", remoteFolderPath = "/a",
+                localFolderUri = "content://a", lastSyncAt = 1_000L, lastSyncStatus = "ERROR",
+            ),
+            FolderPairEntity(
+                id = 2, accountId = 1, name = "ok", remoteFolderPath = "/b",
+                localFolderUri = "content://b", lastSyncAt = 9_000L, lastSyncStatus = "OK",
+            ),
+        )
+        val metrics = SyncOverviewMetrics.from(pairs, emptyList(), syncing = false)
+        assertEquals("ERROR", metrics.lastSyncStatus)
+        assertEquals(9_000L, metrics.lastSyncAtMillis)
+    }
+
+    @Test
     fun `empty pairs yields null last sync`() {
         val metrics = SyncOverviewMetrics.from(emptyList(), emptyList(), syncing = false)
         assertNull(metrics.lastSyncAtMillis)
