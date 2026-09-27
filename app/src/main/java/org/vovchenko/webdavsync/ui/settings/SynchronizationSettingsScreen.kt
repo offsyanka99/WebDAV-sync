@@ -228,5 +228,4 @@ private const val BATTERY_LOW_INFO =
 
 private const val BATTERY_SAVER_INFO =
     "Sets Wi‑Fi only, only while charging, 3-hour interval, and turns off sync-on-local-change. " +
-        "While this profile stays on, per-pair Instant upload does not watch folders or wake the phone. " +
-        "Changing any of these settings turns those watches back on."
+        "A folder pair’s Instant upload checkbox still watches that folder."

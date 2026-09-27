@@ -37,9 +37,19 @@ class InstantWatchPolicyTest {
     }
 
     @Test
-    fun `battery saver profile disarms per-pair instant upload`() {
+    fun `battery saver keeps a pair whose Instant upload checkbox is on`() {
         val pair = pair(enabled = true, instantUpload = true)
         val settings = AppSettings().applyBatterySaverProfile()
+        assertTrue(InstantWatchPolicy.shouldWatch(pair, settings))
+    }
+
+    @Test
+    fun `battery saver suppresses only the global immediate switch`() {
+        val pair = pair(enabled = true, instantUpload = false)
+        val settings = AppSettings(
+            autoSyncEnabled = true,
+            syncImmediatelyOnLocalChange = true,
+        ).applyBatterySaverProfile()
         assertFalse(InstantWatchPolicy.shouldWatch(pair, settings))
     }
 

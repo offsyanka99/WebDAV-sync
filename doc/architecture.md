@@ -1,7 +1,7 @@
 # WebDAV-sync architecture
 
 **App:** `org.vovchenko.webdavsync`  
-**Version documented:** 1.1.5 (`versionCode` 15)  
+**Version documented:** 1.1.6 (`versionCode` 16)  
 **Platform:** Android 8.0+ (minSdk 26, compileSdk 37, targetSdk 35)  
 **Date:** 2026-09-26
 
@@ -167,7 +167,8 @@ Repositories are thin:
 |---|---|---|
 | `periodic_sync` | `PeriodicWorkRequest` `SyncWorker` | Auto-sync enabled. Interval ≥ 15 minutes. Flex window is about one quarter of the interval (at least 5 minutes, always shorter than the interval) |
 | `manual_sync` | one-shot `SyncWorker` | Overview, widget, follow-up, instant upload |
-| `content_watch_{pairId}` | one-shot `ContentWatchWorker` | SAF content-URI trigger for instant upload |
+| `content_watch_{pairId}` | one-shot `ContentWatchWorker` | SAF content-URI trigger for instant upload. Starts a sync only when the root snapshot changed |
+| `instant_root_poll` | one-shot `InstantRootPollWorker`, re-armed every 2 minutes | Instant upload is on. Compares the root snapshot even if the provider never notifies |
 
 Constraints (periodic and manual):
 
@@ -175,9 +176,9 @@ Constraints (periodic and manual):
 - Charging: when “Only while charging” is on
 - Battery not low: periodic only, unless “Sync even when battery is low” is on. Manual and follow-up ignore battery-low
 
-`SyncControl` is an in-process single-flight gate. `tryBeginSession()` uses an `AtomicBoolean` so a periodic worker and a manual worker cannot both transfer. The loser sets a follow-up flag and returns success. Pause polls every 200 ms. Cancel clears pause so waiters wake up.
+`SyncControl` is an in-process single-flight gate. `tryBeginSession()` uses an `AtomicBoolean` so a periodic worker and a manual worker cannot both transfer. The loser asks for a follow-up of the pairs it was going to sync and returns success. A change that arrives while a pass is only queued does not set that flag. Pause polls every 200 ms. Cancel clears pause so waiters wake up.
 
-`SyncWorker` promotes to a foreground notification only when `SyncEngine` is about to do remote I/O (`onNeedsForeground`). An idle to-cloud short-circuit never shows a notification.
+`SyncWorker` promotes to a foreground notification only when `SyncEngine` is about to do remote I/O (`onNeedsForeground`). A pass that transfers nothing never shows a notification and does not overwrite Last sync or Duration.
 
 ## 6. Data model
 
@@ -249,7 +250,7 @@ Stored in DataStore. Defaults for a new install:
 | Auto-start after reboot | off |
 | Diagnostic log | off |
 
-“Battery saver profile” sets Wi-Fi only, charging only, 180-minute interval, auto-sync on, immediate-on-change off, battery-low sync off. While those settings stay in place, per-pair Instant upload does not register watches.
+“Battery saver profile” sets Wi-Fi only, charging only, 180-minute interval, auto-sync on, immediate-on-change off, battery-low sync off. A folder pair’s Instant upload checkbox still registers watches.
 
 ### 6.6 Secrets and certificates
 
@@ -319,7 +320,7 @@ The worker returns `Result.success()` even when pairs reported errors. That is d
 Two different fingerprints exist:
 
 1. **Full snapshot** (`IdleSyncPolicy.fingerprint`) over the scanned entries. Stored on the pair after a successful pass. This is what an unchanged-tree skip compares.
-2. **Cheap root snapshot** (`LocalTreeFingerprint`): one or two SAF queries of the tree root and its immediate children. When it matches the stored value, the last full walk was under 6 hours ago, and the last remote scan was under 24 hours ago, the engine skips the full walk. Nested edits that do not change the root listing are still walked on that 6-hour cadence. The 90-second poll uses the same snapshot only for pairs whose in-process observer failed to register.
+2. **Cheap root snapshot** (`LocalTreeFingerprint`): one or two SAF queries of the tree root and its immediate children. When it matches the stored value, the last full walk was under 6 hours ago, and the last remote scan was under 24 hours ago, the engine skips the full walk. Nested edits that do not change the root listing are still walked on that 6-hour cadence. The same snapshot is what the 90-second in-process poll and the 2-minute background poll compare. A file added inside a subfolder is invisible to it until the provider updates the parent listing or the full walk runs.
 
 ### 7.3 Idle short-circuit
 
@@ -330,7 +331,7 @@ Two different fingerprints exist:
 - file mtimes are real (none are 0)
 - the last PROPFIND walk was under 24 hours ago
 
-Then the engine does not open a socket, does not PROPFIND, does not MKCOL, and does not show a notification. It also does not overwrite Last sync / duration. A remote-only edit waits until that 24-hour cap.
+Then the engine does not open a socket, does not PROPFIND, does not MKCOL, and does not show a notification. It also does not overwrite Last sync or Duration. A remote-only edit waits until that 24-hour cap. A later pass that only re-baselines matching files (`RememberInSync`) is treated the same way: fingerprints are kept, Last sync and Duration stay on the last pass that actually transferred.
 
 `canSkipEnsureRemote` skips MKCOL when the last status is already `OK`, on the assumption the remote root was created last time.
 
@@ -340,7 +341,7 @@ Then the engine does not open a socket, does not PROPFIND, does not MKCOL, and d
 
 - The display name is the last decoded href segment (`DavHref`). `+` is not treated as a space.
 - Excluded globs are not descended into.
-- Hidden names are **not** filtered here.
+- Hidden names are skipped, including their children, when `excludeHiddenFiles` is true.
 - The child URL is `RemotePaths.join(parent, name)`, then `WebDavPathSafety.sanitize`. A `.` or `..` segment throws and fails the scan.
 - If sanitizing the child yields the same path as the parent, the child is skipped (guards a self-href that escaped the list filter).
 
@@ -472,18 +473,18 @@ flowchart TD
     flag2 -->|yes| manual
 ```
 
-Instant watch is on for a pair when the pair is enabled and either `instantUpload` is set or global auto-sync and “sync immediately on local changes” are both on (`InstantWatchPolicy`).
+Instant watch is on for an enabled pair when its Instant upload checkbox is on, or when global auto-sync and “sync immediately on local changes” are both on and the battery-saver profile is not (`InstantWatchPolicy`). The checkbox still watches while battery saver is on.
 
 Watch layers, cheapest signal first:
 
 1. `FolderChangeObserver` on the tree URI and the child-documents URI, recursive, while the process is alive. Callback hops off the provider thread onto the app scope.
-2. `ContentWatchWorker`, a one-shot WorkManager job with `addContentUriTrigger` (60 s update delay, 10 min max delay). The worker re-arms itself with `APPEND` (a `REPLACE` would cancel the running worker) and enqueues `manual_sync` for that pair. The watch itself has no network constraint, so it can re-arm offline. The transfer still has the normal Wi-Fi / charging constraints. A second trigger while that sync is only queued does not schedule another pass.
-3. A 90 s poll of `LocalTreeFingerprint`, only for pairs whose `ContentObserver` failed to register.
+2. `ContentWatchWorker`, a one-shot WorkManager job with `addContentUriTrigger` (60 s update delay, 10 min max delay). The worker re-arms itself with `APPEND` (a `REPLACE` would cancel the running worker). It enqueues `manual_sync` for that pair only when the cheap root snapshot differs from the one stored at the last full scan. The watch itself has no network constraint, so it can re-arm offline. The transfer still has the normal Wi-Fi / charging constraints. A second trigger while that sync is only queued does not schedule another pass.
+3. A 90 s in-process poll of `LocalTreeFingerprint` for every watched pair, plus a WorkManager check every 2 minutes (`instant_root_poll`) so a copy is noticed even when the storage provider never notifies and the app process is not running.
 4. Periodic `SyncWorker` as the backstop.
 
 During an active session, local changes do not cancel the pass. They set the follow-up flag and refresh the in-memory fingerprint so the poller does not immediately fire again. After the pass, `reseedAfterSync` updates fingerprints and starts a 15 s per-pair cooldown so the files the sync itself just wrote are not treated as a new user edit.
 
-`enqueueImmediateSync` uses `ExistingWorkPolicy.KEEP` and will not `REPLACE` a running pass. If a session or a RUNNING/ENQUEUED/BLOCKED manual job or a RUNNING periodic job exists, it only sets the follow-up flag. The follow-up is enqueued from the worker `finally` block with `APPEND_OR_REPLACE` on `manual_sync`, which is a different unique name from the periodic job.
+`enqueueImmediateSync` uses `ExistingWorkPolicy.KEEP` and will not `REPLACE` a running pass. A follow-up is recorded only while a session is already active, and it names the pair that changed. A manual job that is only queued is left alone, because that pass has not scanned yet. The follow-up is enqueued from the worker `finally` block with `APPEND_OR_REPLACE` on `manual_sync`, which is a different unique name from the periodic job.
 
 Mobile-data warning (`ManualSyncStarter`) applies only to Overview and the widget. Scheduled sync and instant upload do not show it. “Wi-Fi only” is the control that actually withholds those transfers.
 
@@ -567,11 +568,9 @@ Unit tests cover diff cases, conflict names, idle policy, scheduler constraints,
 
 ## 15. Operational facts worth remembering
 
-- A file is “known” to three-way sync only after a transfer writes a baseline row. A no-op “both sides already match” result does not write one.
-- Remote change detection for two-way sync is size-based. ETag is parsed and stored on the in-memory remote entry, then dropped.
-- To-cloud can skip the network entirely when the local snapshot is unchanged. Remote deletes and remote edits are invisible until the local tree changes.
-- To-device and to-cloud sameness checks compare live local mtime with live remote `Last-Modified`, not the baseline.
-- Status on Overview is the `lastSyncStatus` of whichever pair has the newest `lastSyncAt`, not an aggregate of all pairs.
+- A file becomes “known” when a transfer or a `RememberInSync` result writes a baseline row (size, mtime, and ETag or content hash when the server or the clock does not make a later edit visible).
+- Two-way, to-device, and to-cloud can skip the network when the full local fingerprint is unchanged, mtimes are real, the last status is OK, and the last remote scan is under 24 hours old. A remote-only edit waits for that cap.
+- One-way sameness uses that baseline, not a raw local-mtime versus remote `Last-Modified` compare.
+- Overview status is ERROR if any enabled pair’s last status is ERROR. Otherwise it is the status of the pair with the newest `lastSyncAt`.
 - Renames are delete-plus-add. There is no move detection.
-- Empty files are never uploaded (`contentLength <= 0` is refused).
 - The app will not follow an HTTP redirect to a canonical WebDAV URL. The saved base URL has to be the URL that answers `PROPFIND` directly.

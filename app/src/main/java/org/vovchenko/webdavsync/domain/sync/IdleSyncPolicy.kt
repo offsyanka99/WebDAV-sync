@@ -95,6 +95,13 @@ object IdleSyncPolicy {
     fun hashSweepIsFresh(lastSweepAt: Long?, nowMillis: Long): Boolean =
         lastSweepAt != null && nowMillis - lastSweepAt < CONTENT_HASH_SWEEP_MAX_AGE_MS
 
+    /**
+     * True when a fresh root snapshot differs from the one stored at the last full scan.
+     * A zero current value means the provider query failed; that is not a change.
+     */
+    fun cheapRootChanged(stored: Long?, current: Long): Boolean =
+        current != 0L && stored != current
+
     fun canSkipEnsureRemote(lastSyncStatus: String?): Boolean = lastSyncStatus == STATUS_OK
 
     /** Parent directories of [filePaths], deepest first, for empty-folder cleanup. */

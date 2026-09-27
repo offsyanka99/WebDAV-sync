@@ -136,6 +136,14 @@ class IdleSyncPolicyTest {
     }
 
     @Test
+    fun `cheap root change ignores a failed query and a matching snapshot`() {
+        assertFalse(IdleSyncPolicy.cheapRootChanged(stored = 5L, current = 0L))
+        assertFalse(IdleSyncPolicy.cheapRootChanged(stored = 5L, current = 5L))
+        assertTrue(IdleSyncPolicy.cheapRootChanged(stored = 5L, current = 6L))
+        assertTrue(IdleSyncPolicy.cheapRootChanged(stored = null, current = 6L))
+    }
+
+    @Test
     fun `content hash sweep stays fresh for a day`() {
         val now = 5_000L
         assertTrue(IdleSyncPolicy.hashSweepIsFresh(now - 60_000, now))

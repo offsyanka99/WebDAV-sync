@@ -153,6 +153,36 @@ class SyncScheduler @Inject constructor(
         }
     }
 
+    /**
+     * While any pair is watched, wake every [INSTANT_POLL_DELAY_MINUTES] and compare the root
+     * snapshot. SAF often never delivers a content notification for a file copied by another app.
+     */
+    fun reconcileInstantPoll(enabled: Boolean) {
+        if (!enabled) {
+            workManager.cancelUniqueWork(INSTANT_POLL_WORK_NAME)
+            return
+        }
+        workManager.enqueueUniqueWork(
+            INSTANT_POLL_WORK_NAME,
+            ExistingWorkPolicy.KEEP,
+            instantPollRequest(),
+        )
+    }
+
+    fun scheduleNextInstantPoll() {
+        // APPEND, not REPLACE: REPLACE would cancel this worker before it can finish.
+        workManager.enqueueUniqueWork(
+            INSTANT_POLL_WORK_NAME,
+            ExistingWorkPolicy.APPEND,
+            instantPollRequest(),
+        )
+    }
+
+    private fun instantPollRequest() =
+        OneTimeWorkRequestBuilder<InstantRootPollWorker>()
+            .setInitialDelay(INSTANT_POLL_DELAY_MINUTES, TimeUnit.MINUTES)
+            .build()
+
     fun cancelContentWatch(pairId: Long) {
         workManager.cancelUniqueWork(contentWatchName(pairId))
     }
@@ -261,6 +291,8 @@ class SyncScheduler @Inject constructor(
         private const val TAG = "SyncScheduler"
         const val MIN_INTERVAL_MINUTES = 15 // androidx.work.PeriodicWorkRequest's enforced floor
         const val CONTENT_WATCH_TAG = "content_watch"
+        const val INSTANT_POLL_WORK_NAME = "instant_root_poll"
+        const val INSTANT_POLL_DELAY_MINUTES = 2L
         private const val CONTENT_WATCH_NAME_PREFIX = "content_watch_"
         private const val ContentResolverScheme = "content"
         /** Batch a burst of file notifications into one wake. */

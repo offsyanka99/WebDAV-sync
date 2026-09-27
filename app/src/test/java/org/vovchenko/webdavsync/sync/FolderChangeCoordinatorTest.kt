@@ -90,8 +90,8 @@ class FolderChangeCoordinatorTest {
             advanceTimeBy(FolderChangeCoordinator.CHEAP_POLL_MS)
             runCurrent()
             assertEquals(
-                "healthy observer does not keep polling",
-                seeded,
+                "one cheap poll after ${FolderChangeCoordinator.CHEAP_POLL_MS}ms",
+                seeded + 1,
                 fingerprint.scans.get(),
             )
 

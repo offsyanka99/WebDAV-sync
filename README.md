@@ -2,7 +2,7 @@
 
 Android app that keeps local folders and WebDAV remote folders in sync — manually, on a schedule, or when files change.
 
-**Current release:** [v1.1.5](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.1.5)  
+**Current release:** [v1.1.6](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.1.6)  
 **Min Android:** 8.0 (API 26)  
 **License:** [MIT](LICENSE)
 
@@ -15,8 +15,8 @@ Android app that keeps local folders and WebDAV remote folders in sync — manua
   - **To the device** — remote → local only
   - **To the cloud** — local → remote only
 - **Background sync** via WorkManager (periodic + manual + boot reschedule), with a flex window and “battery not low” by default
-- **Instant upload** when local changes are detected (optional per pair), coalesced so it never interrupts an in-flight pass — off by default on new installs
-- **Battery saver profile** (Wi‑Fi only, charging only, 3-hour interval, no sync-on-local-change)
+- **Instant upload** when local changes are detected (optional per pair). A folder-root check runs about every 90 seconds while the app is open and every 2 minutes in the background, because some storage providers never send a change notification. A change during a pass is coalesced instead of interrupting it. Off by default on new installs
+- **Battery saver profile** (Wi‑Fi only, charging only, 3-hour interval, no global sync-on-local-change). A folder’s Instant upload checkbox still watches that folder
 - **Foreground notification** with pause / resume / cancel only while a pass is talking to the server
 - **Live Recent changes on Overview** while a pass is running (upload / download / delete counts, no DB write per file)
 - **Size limits** for upload and download
@@ -106,6 +106,12 @@ Core flow: scan local + remote → diff against last-sync baseline → transfer/
 - **Issues:** [GitHub Issues](https://github.com/offsyanka99/WebDAV-sync/issues)
 
 ## Changelog (recent)
+
+### v1.1.6
+
+- **Instant upload notices a file copied by another app.** The folder root is checked about every 90 seconds while the app is open, and every 2 minutes in the background, even when the storage provider never sends a change notification.
+- **A folder’s Instant upload checkbox stays active** when the battery-saver profile is on.
+- **A pass that transfers nothing no longer replaces Last sync or Duration**, so a real upload is not shown as 0 seconds.
 
 ### v1.1.5
 

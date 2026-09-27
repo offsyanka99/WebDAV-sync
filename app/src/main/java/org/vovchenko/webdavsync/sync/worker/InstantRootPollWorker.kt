@@ -4,7 +4,6 @@ import android.content.Context
 import android.net.Uri
 import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
-import androidx.work.ExistingWorkPolicy
 import androidx.work.WorkerParameters
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
@@ -17,11 +16,12 @@ import org.vovchenko.webdavsync.domain.sync.IdleSyncPolicy
 import org.vovchenko.webdavsync.sync.InstantWatchPolicy
 
 /**
- * Fires when JobScheduler reports a SAF content-URI change for a watched folder pair.
- * Enqueues a constrained [SyncWorker] and re-arms the one-shot content-URI watch.
+ * Wakes while instant upload is on and compares each watched folder's root snapshot to the
+ * snapshot stored at the last full scan. A file copied by another app often never notifies
+ * [ContentWatchWorker], so this poll is what starts the sync.
  */
 @HiltWorker
-class ContentWatchWorker @AssistedInject constructor(
+class InstantRootPollWorker @AssistedInject constructor(
     @Assisted context: Context,
     @Assisted params: WorkerParameters,
     private val folderPairRepository: FolderPairRepository,
@@ -32,33 +32,25 @@ class ContentWatchWorker @AssistedInject constructor(
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
-        val pairId = inputData.getLong(KEY_FOLDER_PAIR_ID, -1L)
-        if (pairId < 0L) return Result.success()
-
-        diagnosticLogger.i(TAG, "Content URI trigger pairId=$pairId")
-        val pair = folderPairRepository.observeById(pairId).first()
         val settings = settingsRepository.settings.first()
-        val stillWatching = pair != null && InstantWatchPolicy.shouldWatch(pair, settings)
-
-        // APPEND while this unique work is still RUNNING — REPLACE would cancel us.
-        if (stillWatching && pair != null) {
-            syncScheduler.armContentWatch(pair, ExistingWorkPolicy.APPEND)
+        val watched = folderPairRepository.observeAll().first()
+            .filter { InstantWatchPolicy.shouldWatch(it, settings) }
+        if (watched.isEmpty()) {
+            diagnosticLogger.i(TAG, "Instant poll stopped; nothing is watched")
+            return Result.success()
         }
-
-        if (stillWatching && pair != null) {
+        for (pair in watched) {
             val cheap = runCatching { treeFingerprint.of(Uri.parse(pair.localFolderUri)) }.getOrDefault(0L)
-            if (!IdleSyncPolicy.cheapRootChanged(pair.lastCheapFingerprint, cheap)) {
-                diagnosticLogger.i(TAG, "Content trigger ignored, root unchanged pairId=$pairId")
-            } else {
-                diagnosticLogger.i(TAG, "Content trigger root changed pairId=$pairId")
-                syncScheduler.enqueueImmediateSync(pairId)
+            if (IdleSyncPolicy.cheapRootChanged(pair.lastCheapFingerprint, cheap)) {
+                diagnosticLogger.i(TAG, "Instant poll root changed pairId=${pair.id}")
+                syncScheduler.enqueueImmediateSync(pair.id)
             }
         }
+        syncScheduler.scheduleNextInstantPoll()
         return Result.success()
     }
 
-    companion object {
-        private const val TAG = "ContentWatch"
-        const val KEY_FOLDER_PAIR_ID = "folder_pair_id"
+    private companion object {
+        const val TAG = "InstantPoll"
     }
 }

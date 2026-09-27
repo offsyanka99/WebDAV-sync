@@ -276,7 +276,7 @@ class SyncEngine @Inject constructor(
                 "downloaded=${finalOutcome.downloaded} deletedLocal=${finalOutcome.deletedLocal} " +
                 "deletedRemote=${finalOutcome.deletedRemote} conflicts=${finalOutcome.conflicts} " +
                 "errors=${finalOutcome.errors} skipped=${finalOutcome.skipped} durationMs=$durationMs" +
-                if (finalOutcome.isIdleNoOp && actions.isEmpty()) " (idle no-op)" else "",
+                if (finalOutcome.isIdleNoOp) " (idle no-op)" else "",
         )
 
         val ok = status == IdleSyncPolicy.STATUS_OK
@@ -286,9 +286,9 @@ class SyncEngine @Inject constructor(
         val rememberCheap = ok || !mtimeReliable
         val persistedCheap = if (ok && mtimeReliable) cheapFingerprint else null
 
-        // Idle follow-up (0 actions, nothing transferred) must not overwrite the real pass's
-        // Last sync / Duration — that made multi-minute downloads show "duration: 1s".
-        if (finalOutcome.isIdleNoOp && actions.isEmpty()) {
+        // Nothing transferred (including a pass that only re-baselines matching files).
+        // Overwriting Last sync / Duration here replaced a real upload with "0s".
+        if (finalOutcome.isIdleNoOp) {
             finishPair(
                 pair,
                 elapsedStart,
