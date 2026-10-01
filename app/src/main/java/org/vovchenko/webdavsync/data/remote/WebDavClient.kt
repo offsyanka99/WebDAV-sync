@@ -1,5 +1,8 @@
 package org.vovchenko.webdavsync.data.remote
 
+import org.vovchenko.webdavsync.data.remote.push.PushCapability
+import org.vovchenko.webdavsync.data.remote.push.PushRegistrationResult
+import org.vovchenko.webdavsync.data.remote.push.PushSubscriptionRequest
 import java.io.Closeable
 import java.io.InputStream
 
@@ -42,4 +45,22 @@ interface WebDavClient : Closeable {
     suspend fun exists(remotePath: String): Result<Boolean>
 
     suspend fun getQuota(): Result<WebDavQuota>
+
+    /**
+     * Depth-0 PROPFIND of the WebDAV-Push properties on a collection. Success with null means the
+     * collection does not offer push; a missing collection fails with [WebDavException.NotFound].
+     */
+    suspend fun discoverPush(remotePath: String): Result<PushCapability?>
+
+    /** POSTs a `<push-register>` to the collection. Protocol outcomes are in the result value. */
+    suspend fun registerPush(remotePath: String, request: PushSubscriptionRequest): Result<PushRegistrationResult>
+
+    /**
+     * DELETEs a registration URL. Fails without sending anything when [registrationUrl] is not on
+     * the account's origin. `404` counts as success.
+     */
+    suspend fun unregisterPush(registrationUrl: String): Result<Unit>
+
+    /** Registration URLs sent as `Push-Dont-Notify` on mutating requests; empty clears it. */
+    fun setPushDontNotify(registrationUrls: List<String>)
 }

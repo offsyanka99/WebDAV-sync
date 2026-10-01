@@ -48,4 +48,9 @@ data class FolderPairEntity(
     val lastFullLocalScanAt: Long? = null,
     /** Wall-clock time of the last content-hash sweep of mtime-0 files. */
     val lastContentHashSweepAt: Long? = null,
+    /**
+     * Wall-clock time of the last unconsumed WebDAV-Push for this pair. Non-null forces a full
+     * local walk and a remote scan. Written only by the dedicated [FolderPairDao] queries.
+     */
+    val remoteChangePendingAt: Long? = null,
 )

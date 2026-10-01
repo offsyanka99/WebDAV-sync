@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -20,6 +21,7 @@ import org.vovchenko.webdavsync.data.repository.FolderPairRepository
 import org.vovchenko.webdavsync.data.repository.SyncFileStateRepository
 import org.vovchenko.webdavsync.data.repository.WebDavAccountRepository
 import org.vovchenko.webdavsync.domain.sync.RemotePaths
+import org.vovchenko.webdavsync.push.PushRegistrationManager
 import javax.inject.Inject
 
 @HiltViewModel
@@ -30,6 +32,7 @@ class AccountsViewModel @Inject constructor(
     private val localFileIo: LocalFileIo,
     private val safFolderAccess: SafFolderAccess,
     private val syncFileStateRepository: SyncFileStateRepository,
+    private val pushRegistrationManager: PushRegistrationManager,
 ) : ViewModel() {
 
     val accounts: StateFlow<List<WebDavAccountEntity>> =
@@ -102,6 +105,14 @@ class AccountsViewModel @Inject constructor(
                         "Some synced files for \"${account.displayName}\" could not be deleted ($failures item(s))."
                     else -> null
                 }
+            }
+            // While the credentials still exist; the account delete below cascades the push rows.
+            try {
+                pushRegistrationManager.unregisterAccount(account.id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Best effort: server-side expiry removes what could not be deleted.
             }
             accountRepository.deleteAccount(account)
         }

@@ -22,8 +22,8 @@ android {
         applicationId = "org.vovchenko.webdavsync"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "1.1.6"
+        versionCode = 18
+        versionName = "1.2.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -81,6 +81,16 @@ ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
 }
 
+// The UnifiedPush connector depends on the JVM `tink`, which duplicates security-crypto's
+// `tink-android`. Resolve both to one tink-android; stored passwords were verified to decrypt
+// after the 1.8.0 → 1.23.0 upgrade (plan R1).
+configurations.all {
+    resolutionStrategy.dependencySubstitution {
+        substitute(module("com.google.crypto.tink:tink"))
+            .using(module("com.google.crypto.tink:tink-android:1.23.0"))
+    }
+}
+
 // Output APK as WebDAV-sync-{versionName}.apk (e.g. WebDAV-sync-1.0.0.apk).
 // AGP 9 puts versionName on each output, not on the variant.
 androidComponents {
@@ -119,6 +129,11 @@ dependencies {
     // Still the deprecated Jetpack crypto artifact. Replacing it would rewrite stored passwords.
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
+    // WebDAV-Push transport (no FCM). Tink resolution: see configurations.all above.
+    implementation("org.unifiedpush.android:connector:3.3.5")
+    // Built-in "Google Play (FCM)" push service: FOSS, no Firebase SDK; works only where Play services exist.
+    implementation("org.unifiedpush.android:embedded-fcm-distributor:3.1.0")
+
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.github.thegrizzlylabs:sardine-android:0.9") {
         // xpp3 duplicates org.xmlpull.v1.XmlPullParser, which the Android platform already
@@ -142,6 +157,7 @@ dependencies {
     testImplementation("androidx.work:work-testing:2.11.2")
     testImplementation("org.robolectric:robolectric:4.16.1")
     testImplementation("androidx.test:core:1.7.0")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test:runner:1.7.0")

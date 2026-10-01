@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import org.vovchenko.webdavsync.data.local.FolderPairEntity
 import org.vovchenko.webdavsync.domain.sync.SyncStatusDisplay
+import org.vovchenko.webdavsync.push.PushStatus
 import org.vovchenko.webdavsync.ui.components.LabeledRow
 import org.vovchenko.webdavsync.ui.theme.StatusError
 import org.vovchenko.webdavsync.ui.theme.StatusOk
@@ -102,6 +103,13 @@ fun FoldersScreen(
                             color = folderStatusColor(resolved.colorRole),
                             style = MaterialTheme.typography.bodyMedium,
                         )
+                        row.push?.let { push ->
+                            Text(
+                                text = push.text,
+                                color = pushToneColor(push.tone),
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
                         ToggleRow(
                             label = "Enabled",
                             checked = pair.enabled,
@@ -149,4 +157,11 @@ private fun folderStatusColor(role: SyncStatusDisplay.ColorRole): Color = when (
     SyncStatusDisplay.ColorRole.OK -> StatusOk
     SyncStatusDisplay.ColorRole.ERROR -> StatusError
     SyncStatusDisplay.ColorRole.NEUTRAL -> Color.Unspecified
+}
+
+private fun pushToneColor(tone: PushStatus.Tone): Color = when (tone) {
+    PushStatus.Tone.OK -> StatusOk
+    PushStatus.Tone.WARN -> StatusWarn
+    PushStatus.Tone.ERROR -> StatusError
+    PushStatus.Tone.NEUTRAL -> Color.Unspecified
 }

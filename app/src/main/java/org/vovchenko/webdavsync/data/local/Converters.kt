@@ -1,6 +1,8 @@
 package org.vovchenko.webdavsync.data.local
 
 import androidx.room.TypeConverter
+import org.vovchenko.webdavsync.data.local.push.PushEndpointState
+import org.vovchenko.webdavsync.data.local.push.PushRegistrationState
 import org.vovchenko.webdavsync.data.model.AuthScheme
 import org.vovchenko.webdavsync.data.model.SyncEventType
 import org.vovchenko.webdavsync.data.model.SyncMethod
@@ -23,6 +25,18 @@ class Converters {
 
     @TypeConverter
     fun toSyncEventType(value: String): SyncEventType = SyncEventType.valueOf(value)
+
+    @TypeConverter
+    fun fromPushRegistrationState(value: PushRegistrationState): String = value.name
+
+    @TypeConverter
+    fun toPushRegistrationState(value: String): PushRegistrationState = PushRegistrationState.valueOf(value)
+
+    @TypeConverter
+    fun fromPushEndpointState(value: PushEndpointState): String = value.name
+
+    @TypeConverter
+    fun toPushEndpointState(value: String): PushEndpointState = PushEndpointState.valueOf(value)
 
     // Relative paths can't contain newlines, so it's a safe, simple delimiter.
     @TypeConverter

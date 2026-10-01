@@ -51,6 +51,7 @@ fun AddEditFolderPairScreen(
     viewModel: AddEditFolderPairViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val pushStatus by viewModel.pushStatus.collectAsState()
     val form = uiState.form
 
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -219,6 +220,14 @@ fun AddEditFolderPairScreen(
             }
 
             ToggleRow(label = "Enabled", checked = form.enabled, onCheckedChange = viewModel::setEnabled)
+
+            pushStatus?.let { status ->
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
 
             if (uiState.error != null) {
                 Text(text = uiState.error!!, color = MaterialTheme.colorScheme.error)

@@ -23,8 +23,19 @@ import org.vovchenko.webdavsync.domain.sync.SyncStatusDisplay
 import org.vovchenko.webdavsync.sync.control.ManualSyncDecision
 import org.vovchenko.webdavsync.sync.control.ManualSyncStarter
 import org.vovchenko.webdavsync.sync.control.SyncProgress
+import org.vovchenko.webdavsync.sync.control.SyncUserMessage
+import org.vovchenko.webdavsync.sync.control.UserSyncResult
 import org.vovchenko.webdavsync.sync.worker.SyncScheduler
 import javax.inject.Inject
+
+enum class OverviewSyncDialog {
+    None,
+    MobileData,
+    UnmeteredOverride,
+}
+
+/** A one-shot notice. [id] changes so the same text can be shown again. */
+data class SyncNotice(val id: Long, val text: String)
 
 data class OverviewUiState(
     val lastSyncAtMillis: Long? = null,
@@ -82,8 +93,11 @@ class OverviewViewModel @Inject constructor(
     private val syncProgress: SyncProgress,
 ) : ViewModel() {
 
-    private val _showMobileDataWarning = MutableStateFlow(false)
-    val showMobileDataWarning: StateFlow<Boolean> = _showMobileDataWarning.asStateFlow()
+    private val _syncDialog = MutableStateFlow(OverviewSyncDialog.None)
+    val syncDialog: StateFlow<OverviewSyncDialog> = _syncDialog.asStateFlow()
+
+    private val _syncNotice = MutableStateFlow<SyncNotice?>(null)
+    val syncNotice: StateFlow<SyncNotice?> = _syncNotice.asStateFlow()
 
     val uiState: StateFlow<OverviewUiState> = combine(
         folderPairRepository.observeAll(),
@@ -99,34 +113,66 @@ class OverviewViewModel @Inject constructor(
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), OverviewUiState())
 
-    /** Entry point for the Sync button — may show a mobile-data warning first. */
+    /** Entry point for the Sync button and a widget tap that opened Overview. */
     fun requestSync() {
-        // Still allow the mobile-data dialog even if a pass is already running (user may have
-        // been surprised by auto/folder-watch sync). Only block starting another pass when busy
-        // without needing a warning.
         viewModelScope.launch {
+            if (syncScheduler.isSyncWorkerRunning()) {
+                publish(syncScheduler.enqueueUserSync(bypassUnmetered = false))
+                return@launch
+            }
             val settings = settingsRepository.settings.first()
             when (ManualSyncStarter.prepareManualSync(context, settings)) {
-                ManualSyncDecision.NeedsMobileDataConfirm -> {
-                    _showMobileDataWarning.value = true
-                    return@launch
+                ManualSyncDecision.NeedsUnmeteredOverride -> {
+                    _syncDialog.value = OverviewSyncDialog.UnmeteredOverride
                 }
-                ManualSyncDecision.Proceed -> Unit
+                ManualSyncDecision.NeedsMobileDataConfirm -> {
+                    _syncDialog.value = OverviewSyncDialog.MobileData
+                }
+                ManualSyncDecision.Proceed -> publish(syncScheduler.enqueueUserSync(bypassUnmetered = false))
             }
-            if (uiState.value.syncing) return@launch
-            syncScheduler.enqueueImmediateSync()
         }
     }
 
+    /** User accepted cellular use while Wi-Fi only is off. */
     fun confirmMobileDataSync() {
-        _showMobileDataWarning.value = false
+        _syncDialog.value = OverviewSyncDialog.None
         viewModelScope.launch {
-            if (uiState.value.syncing) return@launch
-            syncScheduler.enqueueImmediateSync()
+            publish(syncScheduler.enqueueUserSync(bypassUnmetered = false))
+        }
+    }
+
+    /** This sync may use mobile data. Charging is still required when that setting is on. */
+    fun confirmSyncOnMobileData() {
+        _syncDialog.value = OverviewSyncDialog.None
+        viewModelScope.launch {
+            publish(syncScheduler.enqueueUserSync(bypassUnmetered = true))
+        }
+    }
+
+    /** Keep Wi-Fi only, and replace any waiting sync so it uses the current settings. */
+    fun waitForWifi() {
+        _syncDialog.value = OverviewSyncDialog.None
+        viewModelScope.launch {
+            publish(syncScheduler.enqueueUserSync(bypassUnmetered = false))
         }
     }
 
     fun dismissMobileDataWarning() {
-        _showMobileDataWarning.value = false
+        _syncDialog.value = OverviewSyncDialog.None
+    }
+
+    fun consumeSyncNotice() {
+        _syncNotice.value = null
+    }
+
+    private fun publish(result: UserSyncResult) {
+        val text = when (result) {
+            UserSyncResult.Started -> null
+            UserSyncResult.AlreadyRunning -> SyncUserMessage.ALREADY_RUNNING
+            is UserSyncResult.Waiting -> SyncUserMessage.waiting(result.reasons)
+        }
+        if (text != null) {
+            _syncNotice.value = SyncNotice(id = System.nanoTime(), text = text)
+        }
     }
 }

@@ -23,7 +23,19 @@ class FolderPairRepository @Inject constructor(
 
     suspend fun add(folderPair: FolderPairEntity): Long = dao.insert(folderPair)
 
-    suspend fun update(folderPair: FolderPairEntity) = dao.update(folderPair)
+    /** Whole-row update that keeps the stored [FolderPairEntity.remoteChangePendingAt]; callers often hold a stale copy. */
+    suspend fun update(folderPair: FolderPairEntity) = database.withTransaction {
+        dao.update(folderPair.copy(remoteChangePendingAt = dao.getRemoteChangePendingAt(folderPair.id)))
+    }
+
+    suspend fun markRemoteChangePending(ids: Collection<Long>, at: Long) {
+        if (ids.isNotEmpty()) dao.markRemoteChangePending(ids, at)
+    }
+
+    /** Clears the push flag only if it is not newer than [scanStartedAt]. */
+    suspend fun clearRemoteChangePending(id: Long, scanStartedAt: Long) = dao.clearRemoteChangePending(id, scanStartedAt)
+
+    suspend fun getRemoteChangePending(): List<FolderPairEntity> = dao.getRemoteChangePending()
 
     suspend fun delete(folderPair: FolderPairEntity) = dao.delete(folderPair)
 

@@ -7,6 +7,7 @@ import org.vovchenko.webdavsync.data.model.AuthScheme
 import org.vovchenko.webdavsync.data.remote.auth.BasicAuthStrategy
 import org.vovchenko.webdavsync.data.remote.auth.DigestAuthStrategy
 import org.vovchenko.webdavsync.data.remote.auth.WebDavAuthStrategy
+import org.vovchenko.webdavsync.data.remote.push.PushDontNotify
 import org.vovchenko.webdavsync.data.remote.trust.TrustedCertTrustManagerFactory
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -31,23 +32,34 @@ class WebDavClientFactory @Inject constructor(
         credentials: WebDavCredentials,
         trustedCertificateBytes: ByteArray?,
     ): WebDavClient {
-        val bodyClient = buildOkHttpClient(authScheme, credentials, trustedCertificateBytes)
+        val pushDontNotify = PushDontNotify()
+        val bodyClient = buildOkHttpClient(authScheme, credentials, trustedCertificateBytes, pushDontNotify)
         val metaClient = bodyClient.newBuilder()
             .readTimeout(METADATA_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .writeTimeout(METADATA_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .callTimeout(METADATA_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .build()
         val uploadCache = File(context.cacheDir, "webdav-uploads")
-        return SardineWebDavClient(bodyClient, metaClient, baseUrl, uploadCache)
+        return SardineWebDavClient(bodyClient, metaClient, baseUrl, uploadCache, pushDontNotify)
     }
 
     companion object {
         const val METADATA_TIMEOUT_SECONDS = 60L
 
         fun shutdown(client: OkHttpClient) {
-            client.connectionPool.evictAll()
             client.dispatcher.cancelAll()
-            client.dispatcher.executorService.shutdown()
+            val executor = client.dispatcher.executorService
+            // evictAll closes pooled sockets and writes on the caller. Add account resumes on
+            // the main thread, and Android throws NetworkOnMainThreadException there.
+            val closePool = Runnable {
+                runCatching { client.connectionPool.evictAll() }
+                runCatching { executor.shutdown() }
+            }
+            if (executor.isShutdown) {
+                closePool.run()
+            } else {
+                runCatching { executor.execute(closePool) }.onFailure { closePool.run() }
+            }
         }
     }
 
@@ -63,9 +75,12 @@ class WebDavClientFactory @Inject constructor(
         authScheme: AuthScheme,
         credentials: WebDavCredentials,
         trustedCertificateBytes: ByteArray?,
+        pushDontNotify: PushDontNotify,
     ): OkHttpClient {
         val trust = TrustedCertTrustManagerFactory.build(trustedCertificateBytes)
-        val builder = baseBuilder().sslSocketFactory(trust.sslSocketFactory, trust.trustManager)
+        val builder = baseBuilder()
+            .sslSocketFactory(trust.sslSocketFactory, trust.trustManager)
+            .addInterceptor(pushDontNotify.interceptor)
         val authStrategy: WebDavAuthStrategy = when (authScheme) {
             AuthScheme.BASIC -> BasicAuthStrategy()
             AuthScheme.DIGEST -> DigestAuthStrategy()
@@ -112,6 +127,13 @@ class WebDavClientSession(
         trustedCertificateBytes: ByteArray?,
     ): WebDavClient = clients.getOrPut(accountId) {
         factory.create(baseUrl, authScheme, credentials, trustedCertificateBytes)
+    }
+
+    /** Accounts whose client this session has opened. */
+    fun accountIds(): Set<Long> = clients.keys.toSet()
+
+    fun clearPushDontNotify() {
+        clients.values.forEach { it.setPushDontNotify(emptyList()) }
     }
 
     override fun close() {

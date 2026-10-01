@@ -154,6 +154,38 @@ class IdleSyncPolicyTest {
     }
 
     @Test
+    fun `a pending push disables both idle shortcuts`() {
+        val now = 10_000L
+        for (method in SyncMethod.entries) {
+            assertTrue(
+                IdleSyncPolicy.canSkipRemoteScan(
+                    method, "OK", lastFingerprint = 42L, currentFingerprint = 42L,
+                    lastRemoteScanAt = now, nowMillis = now, mtimeReliable = true, remoteChangePending = false,
+                ),
+            )
+            assertFalse(
+                IdleSyncPolicy.canSkipRemoteScan(
+                    method, "OK", lastFingerprint = 42L, currentFingerprint = 42L,
+                    lastRemoteScanAt = now, nowMillis = now, mtimeReliable = true, remoteChangePending = true,
+                ),
+            )
+        }
+        fun skipWalk(pending: Boolean) = IdleSyncPolicy.canSkipFullLocalWalk(
+            lastCheapFingerprint = 7L,
+            currentCheapFingerprint = 7L,
+            lastFullLocalScanAt = now,
+            nowMillis = now,
+            lastLocalFingerprint = 42L,
+            lastSyncStatus = "OK",
+            lastRemoteScanAt = now,
+            mtimeKnownReliable = true,
+            remoteChangePending = pending,
+        )
+        assertTrue(skipWalk(pending = false))
+        assertFalse(skipWalk(pending = true))
+    }
+
+    @Test
     fun `ensure remote is skipped only after an OK pass`() {
         assertTrue(IdleSyncPolicy.canSkipEnsureRemote("OK"))
         assertFalse(IdleSyncPolicy.canSkipEnsureRemote(null))

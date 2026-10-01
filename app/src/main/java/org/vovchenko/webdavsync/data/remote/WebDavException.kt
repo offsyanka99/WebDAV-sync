@@ -13,6 +13,9 @@ sealed class WebDavException(message: String, cause: Throwable? = null) : Except
     class ServerError(val httpCode: Int, cause: Throwable? = null) :
         WebDavException("Server returned HTTP $httpCode", cause)
 
+    /** A request with credentials was refused because its URL is not on the account's origin. */
+    class ForeignOrigin : WebDavException("Refusing to send credentials to another origin")
+
     class Timeout(cause: Throwable? = null) : WebDavException("Connection timed out", cause)
 
     class NetworkError(cause: Throwable? = null) : WebDavException("Network error", cause)

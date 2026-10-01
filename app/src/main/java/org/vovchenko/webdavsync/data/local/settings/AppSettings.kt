@@ -22,6 +22,8 @@ data class AppSettings(
     val batteryOptimizationDisabled: Boolean = false,
     val autoStartOnBoot: Boolean = false,
     val diagnosticLogEnabled: Boolean = false,
+    /** WebDAV-Push: start a sync when files change on the server. Opt-in. */
+    val instantDownloadEnabled: Boolean = false,
 ) {
     fun applyBatterySaverProfile(): AppSettings = copy(
         wifiOnly = true,

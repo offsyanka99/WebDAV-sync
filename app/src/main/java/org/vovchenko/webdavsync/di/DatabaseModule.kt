@@ -12,6 +12,7 @@ import org.vovchenko.webdavsync.data.local.FolderPairDao
 import org.vovchenko.webdavsync.data.local.SyncFileStateDao
 import org.vovchenko.webdavsync.data.local.SyncLogDao
 import org.vovchenko.webdavsync.data.local.WebDavAccountDao
+import org.vovchenko.webdavsync.data.local.push.PushDao
 import javax.inject.Singleton
 
 @Module
@@ -22,8 +23,16 @@ object DatabaseModule {
     @Singleton
     fun provideAppDatabase(@ApplicationContext context: Context): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, AppDatabase.DATABASE_NAME)
-            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4)
+            .addMigrations(
+                AppDatabase.MIGRATION_1_2,
+                AppDatabase.MIGRATION_2_3,
+                AppDatabase.MIGRATION_3_4,
+                AppDatabase.MIGRATION_4_5,
+            )
             .build()
+
+    @Provides
+    fun providePushDao(db: AppDatabase): PushDao = db.pushDao()
 
     @Provides
     fun provideWebDavAccountDao(db: AppDatabase): WebDavAccountDao = db.webDavAccountDao()

@@ -37,4 +37,13 @@ class AppSettingsTest {
         assertTrue(saver.isBatterySaverProfile())
         assertFalse(aggressive.isBatterySaverProfile())
     }
+
+    @Test
+    fun `instant download is off by default and untouched by battery saver and clamping`() {
+        assertFalse(AppSettings().instantDownloadEnabled)
+        val on = AppSettings(instantDownloadEnabled = true)
+        assertTrue(on.applyBatterySaverProfile().instantDownloadEnabled)
+        assertTrue(on.clamped().instantDownloadEnabled)
+        assertTrue(on.applyBatterySaverProfile().isBatterySaverProfile())
+    }
 }

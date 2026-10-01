@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import org.vovchenko.webdavsync.data.local.FolderPairEntity
@@ -19,8 +20,11 @@ import org.vovchenko.webdavsync.data.local.saf.SafFolderAccess
 import org.vovchenko.webdavsync.data.model.SyncMethod
 import org.vovchenko.webdavsync.data.remote.WebDavPathSafety
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
+import org.vovchenko.webdavsync.data.repository.PushRepository
+import org.vovchenko.webdavsync.data.repository.SettingsRepository
 import org.vovchenko.webdavsync.data.repository.WebDavAccountRepository
 import org.vovchenko.webdavsync.domain.sync.FolderPairEditor
+import org.vovchenko.webdavsync.push.PushStatus
 import javax.inject.Inject
 
 data class AddEditFolderPairFormState(
@@ -60,9 +64,25 @@ class AddEditFolderPairViewModel @Inject constructor(
     private val accountRepository: WebDavAccountRepository,
     private val safFolderAccess: SafFolderAccess,
     private val folderPairEditor: FolderPairEditor,
+    settingsRepository: SettingsRepository,
+    pushRepository: PushRepository,
 ) : ViewModel() {
 
     private val folderPairId: Long? = savedStateHandle.get<Long>("folderPairId")?.takeIf { it > 0 }
+
+    /** WebDAV-Push status of the saved pair; null for a new pair or while the feature is off. */
+    val pushStatus: StateFlow<String?> = (
+        folderPairId?.let { id ->
+            combine(
+                folderPairRepository.observeById(id),
+                settingsRepository.settings,
+                pushRepository.observeRegistrations(),
+                pushRepository.observeEndpoints(),
+            ) { pair, settings, registrations, endpoints ->
+                pair?.let { PushStatus.forPair(it, settings, registrations, endpoints, PushStatus::formatDate) }
+            }
+        } ?: flowOf(null)
+        ).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     private val form = MutableStateFlow(AddEditFolderPairFormState())
     private val events = MutableStateFlow(FormEvents())

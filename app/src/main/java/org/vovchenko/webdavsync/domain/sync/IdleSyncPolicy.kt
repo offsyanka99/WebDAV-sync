@@ -44,7 +44,8 @@ object IdleSyncPolicy {
     /**
      * Skip PROPFIND when the last pass was OK, the local snapshot is unchanged,
      * mtimes are real, and a full remote scan happened within [FULL_REMOTE_SCAN_MAX_AGE_MS].
-     * Applies to two-way, to-device, and to-cloud. A remote-only edit waits until the cap.
+     * Applies to two-way, to-device, and to-cloud. A remote-only edit waits until the cap
+     * unless a WebDAV-Push left [remoteChangePending] set.
      */
     fun canSkipRemoteScan(
         method: SyncMethod,
@@ -54,7 +55,9 @@ object IdleSyncPolicy {
         lastRemoteScanAt: Long?,
         nowMillis: Long,
         mtimeReliable: Boolean,
+        remoteChangePending: Boolean = false,
     ): Boolean {
+        if (remoteChangePending) return false
         if (!mtimeReliable) return false
         if (lastRemoteScanAt == null) return false
         if (nowMillis - lastRemoteScanAt >= FULL_REMOTE_SCAN_MAX_AGE_MS) return false
@@ -80,7 +83,9 @@ object IdleSyncPolicy {
         lastSyncStatus: String?,
         lastRemoteScanAt: Long?,
         mtimeKnownReliable: Boolean,
+        remoteChangePending: Boolean = false,
     ): Boolean {
+        if (remoteChangePending) return false
         if (!mtimeKnownReliable) return false
         if (lastCheapFingerprint == null || lastCheapFingerprint == 0L) return false
         if (currentCheapFingerprint == 0L || lastCheapFingerprint != currentCheapFingerprint) return false

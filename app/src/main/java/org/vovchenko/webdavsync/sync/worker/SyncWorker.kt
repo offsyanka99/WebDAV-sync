@@ -6,6 +6,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import org.vovchenko.webdavsync.R
 import org.vovchenko.webdavsync.data.local.diagnostics.DiagnosticLogger
@@ -16,6 +17,7 @@ import org.vovchenko.webdavsync.data.remote.WebDavClientFactory
 import org.vovchenko.webdavsync.data.remote.WebDavClientSession
 import org.vovchenko.webdavsync.data.repository.WebDavConnectionRepository
 import org.vovchenko.webdavsync.domain.sync.SyncEngine
+import org.vovchenko.webdavsync.push.PushRegistrationManager
 import org.vovchenko.webdavsync.sync.FolderChangeCoordinator
 import org.vovchenko.webdavsync.sync.control.SyncControl
 import org.vovchenko.webdavsync.sync.control.SyncProgress
@@ -39,7 +41,11 @@ class SyncWorker @AssistedInject constructor(
     private val folderChangeCoordinator: FolderChangeCoordinator,
     private val syncScheduler: SyncScheduler,
     private val clientFactory: WebDavClientFactory,
+    private val pushRegistrationManager: PushRegistrationManager,
 ) : CoroutineWorker(context, params) {
+
+    /** `push_sync`: targets are the pairs whose push flag is set when the session starts. */
+    private val pushMode: Boolean get() = inputData.getBoolean(KEY_PUSH_PENDING, false)
 
     override suspend fun doWork(): Result {
         val targetId = inputData.getLong(KEY_FOLDER_PAIR_ID, -1L).takeIf { it >= 0 }
@@ -47,7 +53,7 @@ class SyncWorker @AssistedInject constructor(
         // Two concurrent downloads of the same path make SAF createFile auto-rename to
         // "file (1).jpg", which the next two-way pass then uploads as a new remote file.
         if (!syncControl.tryBeginSession()) {
-            val targets = targetPairIds()
+            val targets = if (pushMode) pendingPushPairIds() else targetPairIds()
             if (targets == null) {
                 syncControl.requestFollowUpSync(null)
             } else {
@@ -55,13 +61,13 @@ class SyncWorker @AssistedInject constructor(
             }
             diagnosticLogger.i(
                 TAG,
-                "Worker skipped (session already active) targetPairId=${targetId ?: "all"} — follow-up requested",
+                "Worker skipped (session already active) targetPairId=${targetId ?: "all"} push=$pushMode — follow-up requested",
             )
             return Result.success()
         }
 
         syncProgress.beginPass()
-        diagnosticLogger.i(TAG, "Worker start targetPairId=${targetId ?: "all"} runAttempt=$runAttemptCount")
+        diagnosticLogger.i(TAG, "Worker start targetPairId=${targetId ?: "all"} push=$pushMode runAttempt=$runAttemptCount")
 
         val clients = clientFactory.openSession()
         return try {
@@ -85,10 +91,16 @@ class SyncWorker @AssistedInject constructor(
     private suspend fun runSyncPass(clients: WebDavClientSession): Result {
         val explicitIds = targetPairIds()
         val pairs = when {
+            // Read after the session is claimed: a later push sees the session and becomes a follow-up.
+            pushMode -> folderPairRepository.getRemoteChangePending()
             explicitIds != null -> explicitIds.mapNotNull { folderPairRepository.observeById(it).first() }
             else -> folderPairRepository.getEnabled()
         }.filter { it.enabled }
 
+        if (pushMode && pairs.isEmpty()) {
+            diagnosticLogger.i(TAG, "Push sync skipped: no pending server changes")
+            return Result.success()
+        }
         diagnosticLogger.i(TAG, "Will sync ${pairs.size} folder pair(s)")
 
         var hadErrors = false
@@ -173,6 +185,17 @@ class SyncWorker @AssistedInject constructor(
             diagnosticLogger.i(TAG, "Skip quota refresh (idle pass)")
         }
 
+        // Push renewals ride on connections this pass already opened: no extra wake or handshake.
+        if (!syncControl.isCancelled && !isStopped) {
+            try {
+                pushRegistrationManager.afterSyncPass(clients.accountIds(), syncedPairIds, clients)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                diagnosticLogger.w(TAG, "Push upkeep after sync failed: ${e.message}")
+            }
+        }
+
         // Do not Result.retry() on logical sync errors — that left WorkManager in ENQUEUED forever
         // so the Overview status stayed "Sync in process..." while the widget already showed ERROR.
         return when {
@@ -201,12 +224,17 @@ class SyncWorker @AssistedInject constructor(
         return if (one >= 0L) setOf(one) else null
     }
 
+    private suspend fun pendingPushPairIds(): Set<Long> =
+        folderPairRepository.getRemoteChangePending().map { it.id }.toSet()
+
     companion object {
         private const val TAG = "SyncWorker"
         const val UNIQUE_PERIODIC_WORK_NAME = "periodic_sync"
         const val UNIQUE_MANUAL_WORK_NAME = "manual_sync"
+        const val UNIQUE_PUSH_WORK_NAME = "push_sync"
         const val KEY_FOLDER_PAIR_ID = "folder_pair_id"
         const val KEY_FOLDER_PAIR_IDS = "folder_pair_ids"
+        const val KEY_PUSH_PENDING = "push_pending"
         private const val LOG_RETENTION_DAYS = 90L
     }
 }

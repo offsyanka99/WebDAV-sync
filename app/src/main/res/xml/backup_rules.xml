@@ -7,4 +7,9 @@
     <exclude domain="database" path="webdav_sync.db-wal" />
     <exclude domain="database" path="webdav_sync.db-shm" />
     <exclude domain="file" path="datastore" />
+    <!-- UnifiedPush connector state: endpoints and Web Push private keys. -->
+    <exclude domain="database" path="unifiedpush-connector" />
+    <exclude domain="database" path="unifiedpush-connector-journal" />
+    <exclude domain="sharedpref" path="unifiedpush.connector.xml" />
+    <exclude domain="sharedpref" path="UP-embedded_fcm.xml" />
 </full-backup-content>

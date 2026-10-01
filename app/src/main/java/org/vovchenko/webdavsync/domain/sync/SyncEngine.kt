@@ -15,6 +15,7 @@ import org.vovchenko.webdavsync.data.local.saf.SafFolderAccess
 import org.vovchenko.webdavsync.data.model.SyncEventType
 import org.vovchenko.webdavsync.data.remote.WebDavClientSession
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
+import org.vovchenko.webdavsync.data.repository.PushRepository
 import org.vovchenko.webdavsync.data.repository.SettingsRepository
 import org.vovchenko.webdavsync.data.repository.SyncFileStateRepository
 import org.vovchenko.webdavsync.data.repository.SyncLogRepository
@@ -47,6 +48,7 @@ class SyncEngine @Inject constructor(
     private val emptyFolderCleaner: EmptyFolderCleaner,
     private val syncControl: SyncControl,
     private val diagnosticLogger: DiagnosticLogger,
+    private val pushRepository: PushRepository,
 ) {
     /**
      * @param onNeedsForeground invoked once this pass will do remote I/O or transfers,
@@ -86,6 +88,9 @@ class SyncEngine @Inject constructor(
                 errorLogMessage = e.message ?: "Sync failed",
             )
             SyncOutcome(errors = 1, durationMs = duration)
+        } finally {
+            // Pairs run one at a time, so the next pair starts with no suppression.
+            clients.clearPushDontNotify()
         }
     }
 
@@ -122,6 +127,11 @@ class SyncEngine @Inject constructor(
         if (!safFolderAccess.hasAccess(localRootUri)) {
             return failSync(pair, elapsedStart, "Local folder access lost — reselect the local folder in this folder pair's settings")
         }
+        // A WebDAV-Push for this pair forces the full walk and the remote scan.
+        val remoteChangePending = pair.remoteChangePendingAt != null
+        if (remoteChangePending) {
+            diagnosticLogger.i(TAG, "Server change pending pair='${pair.name}' (push); idle shortcuts off")
+        }
         val cheapFingerprint = localTreeFingerprint.of(localRootUri)
         if (IdleSyncPolicy.canSkipFullLocalWalk(
                 lastCheapFingerprint = pair.lastCheapFingerprint,
@@ -132,6 +142,7 @@ class SyncEngine @Inject constructor(
                 lastSyncStatus = pair.lastSyncStatus,
                 lastRemoteScanAt = pair.lastRemoteScanAt,
                 mtimeKnownReliable = true,
+                remoteChangePending = remoteChangePending,
             )
         ) {
             diagnosticLogger.i(
@@ -172,6 +183,7 @@ class SyncEngine @Inject constructor(
                 lastRemoteScanAt = pair.lastRemoteScanAt,
                 nowMillis = wallStart,
                 mtimeReliable = mtimeReliable,
+                remoteChangePending = remoteChangePending,
             )
         ) {
             diagnosticLogger.i(TAG, "Idle short-circuit pair='${pair.name}' (local fingerprint unchanged, to-cloud)")
@@ -193,6 +205,12 @@ class SyncEngine @Inject constructor(
         )
 
         val client = clients.clientFor(account.id, account.baseUrl, authScheme, credentials, trustedCert)
+        // Our own writes must not echo back as pushes; cleared in sync()'s finally.
+        val suppression = pushRepository.suppressionUrlsFor(pair.id)
+        client.setPushDontNotify(suppression)
+        if (suppression.isNotEmpty()) {
+            diagnosticLogger.i(TAG, "Push-Dont-Notify pair='${pair.name}' registrations=${suppression.size}")
+        }
 
         if (syncControl.shouldStop()) return cancelledSync(pair, elapsedStart)
         syncControl.awaitWhilePaused()
@@ -210,15 +228,19 @@ class SyncEngine @Inject constructor(
         }
 
         val remoteStarted = SystemClock.elapsedRealtime()
+        val remoteScanStartedAt = System.currentTimeMillis()
         val remoteEntries = remoteTreeScanner.scan(
             client,
             pair.remoteFolderPath,
             pair.excludedSubfolders,
             pair.excludeHiddenFiles,
         ).getOrElse {
+            // The push flag stays set; ERROR already disables the idle shortcuts, so no tight loop.
             diagnosticLogger.e(TAG, "Remote scan failed for pair='${pair.name}'", it)
             return failSync(pair, elapsedStart, "Remote folder scan failed: ${it.message}")
         }
+        // Only pushes older than this scan are consumed; one that arrived mid-walk stays set.
+        folderPairRepository.clearRemoteChangePending(pair.id, remoteScanStartedAt)
         diagnosticLogger.i(
             TAG,
             "Remote scan: ${remoteEntries.size} entries in ${SystemClock.elapsedRealtime() - remoteStarted}ms " +

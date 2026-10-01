@@ -3,12 +3,21 @@ package org.vovchenko.webdavsync.data.remote
 import com.thegrizzlylabs.sardineandroid.impl.OkHttpSardine
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import okio.BufferedSink
+import org.vovchenko.webdavsync.data.remote.push.PushCapability
+import org.vovchenko.webdavsync.data.remote.push.PushDontNotify
+import org.vovchenko.webdavsync.data.remote.push.PushHeaders
+import org.vovchenko.webdavsync.data.remote.push.PushRegistrationResult
+import org.vovchenko.webdavsync.data.remote.push.PushSubscriptionRequest
+import org.vovchenko.webdavsync.data.remote.push.WebDavPushXml
+import org.vovchenko.webdavsync.data.remote.push.sameOrigin
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
 import java.io.File
@@ -25,6 +34,8 @@ class SardineWebDavClient(
     private val metaClient: OkHttpClient,
     private val baseUrl: String,
     private val uploadCacheDir: File,
+    /** Must be the holder whose interceptor is installed on [bodyClient]. */
+    private val pushDontNotify: PushDontNotify = PushDontNotify(),
 ) : WebDavClient {
 
     private val bodySardine by lazy { OkHttpSardine(bodyClient) }
@@ -180,6 +191,95 @@ class SardineWebDavClient(
         }
     }
 
+    override suspend fun discoverPush(remotePath: String): Result<PushCapability?> = runCatchingWebDav {
+        val url = resolve(remotePath, asCollection = true)
+        val request = Request.Builder()
+            .url(url)
+            .method("PROPFIND", WebDavPushXml.DISCOVERY_BODY.toRequestBody("text/xml; charset=utf-8".toMediaType()))
+            .header("Depth", "0")
+            .build()
+        metaClient.newCall(request).execute().use { response ->
+            when (response.code) {
+                207 -> readCapped(response, WebDavPushXml.MAX_MULTISTATUS_BYTES)?.let(WebDavPushXml::parseCapability)
+                401, 403 -> throw WebDavException.AuthenticationFailed()
+                404 -> throw WebDavException.NotFound(url)
+                in 200..299 -> null
+                else -> throw WebDavException.ServerError(response.code)
+            }
+        }
+    }
+
+    override suspend fun registerPush(
+        remotePath: String,
+        request: PushSubscriptionRequest,
+    ): Result<PushRegistrationResult> = runCatchingWebDav {
+        val url = resolve(remotePath, asCollection = true)
+        val body = WebDavPushXml.registerBody(request).toRequestBody("application/xml; charset=utf-8".toMediaType())
+        val httpRequest = Request.Builder().url(url).post(body).build()
+        metaClient.newCall(httpRequest).execute().use { response ->
+            val now = System.currentTimeMillis()
+            when (response.code) {
+                200, 201, 204 -> {
+                    val location = response.header("Location")?.takeIf(PushHeaders::isValidRegistrationUrl)
+                    if (location == null) {
+                        PushRegistrationResult.Failed(response.code, PushRegistrationResult.NO_LOCATION)
+                    } else {
+                        val expiresAt = PushHeaders.parseHttpDate(response.header("Expires"))
+                            ?.takeIf { it > now }
+                            ?: (now + MISSING_EXPIRES_FALLBACK_MS)
+                        PushRegistrationResult.Registered(location, expiresAt)
+                    }
+                }
+                401 -> throw WebDavException.AuthenticationFailed()
+                403 -> {
+                    val condition = readCapped(response, WebDavPushXml.MAX_ERROR_BYTES)
+                        ?.let(WebDavPushXml::parsePrecondition)
+                    when (condition) {
+                        "push-not-available", "no-trigger-supported", "no-supported-trigger" ->
+                            PushRegistrationResult.Unsupported(condition)
+                        "invalid-subscription" -> PushRegistrationResult.InvalidSubscription
+                        else -> PushRegistrationResult.Failed(403, "Forbidden")
+                    }
+                }
+                404 -> throw WebDavException.NotFound(url)
+                429 -> PushRegistrationResult.RateLimited(
+                    PushHeaders.parseRetryAfterSeconds(response.header("Retry-After"), now),
+                )
+                else -> PushRegistrationResult.Failed(response.code, "HTTP ${response.code}")
+            }
+        }
+    }
+
+    override suspend fun unregisterPush(registrationUrl: String): Result<Unit> {
+        val target = registrationUrl.takeIf(PushHeaders::isHeaderSafeUrl)?.toHttpUrlOrNull()
+        val base = baseUrl.toHttpUrlOrNull()
+        if (target == null || base == null || !sameOrigin(target, base)) {
+            return Result.failure(WebDavException.ForeignOrigin())
+        }
+        return runCatchingWebDav {
+            val request = Request.Builder().url(target).delete().build()
+            metaClient.newCall(request).execute().use { response ->
+                when (response.code) {
+                    200, 204, 404 -> Unit
+                    401, 403 -> throw WebDavException.AuthenticationFailed()
+                    else -> throw WebDavException.ServerError(response.code)
+                }
+            }
+        }
+    }
+
+    override fun setPushDontNotify(registrationUrls: List<String>) {
+        pushDontNotify.set(registrationUrls)
+    }
+
+    /** Reads at most [maxBytes] of the body; null when it is larger. */
+    private fun readCapped(response: Response, maxBytes: Int): String? {
+        val source = response.body?.source() ?: return ""
+        source.request(maxBytes + 1L)
+        if (source.buffer.size > maxBytes) return null
+        return source.buffer.readUtf8()
+    }
+
     private fun parseQuota(xml: String): WebDavQuota {
         var available: Long? = null
         var used: Long? = null
@@ -223,6 +323,8 @@ class SardineWebDavClient(
 
     private companion object {
         const val UPLOAD_COPY_BUFFER = 64 * 1024
+        /** Renew soon when the server omits or garbles `Expires`. */
+        const val MISSING_EXPIRES_FALLBACK_MS = 24L * 60 * 60 * 1000
         const val QUOTA_PROPFIND_BODY = """<?xml version="1.0" encoding="utf-8" ?>
 <D:propfind xmlns:D="DAV:">
   <D:prop>

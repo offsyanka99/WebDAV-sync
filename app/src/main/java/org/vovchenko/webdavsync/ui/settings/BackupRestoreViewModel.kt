@@ -159,7 +159,7 @@ private fun java.io.InputStream.readBytes(maxSize: Long): ByteArray {
 
 private const val MAX_IMPORT_BYTES = 5L * 1024 * 1024
 
-private fun AppSettings.toJson(): JSONObject = JSONObject().apply {
+internal fun AppSettings.toJson(): JSONObject = JSONObject().apply {
     put("uploadSizeLimitBytes", uploadSizeLimitBytes ?: JSONObject.NULL)
     put("downloadSizeLimitBytes", downloadSizeLimitBytes ?: JSONObject.NULL)
     put("warnOnMobileNetwork", warnOnMobileNetwork)
@@ -175,9 +175,10 @@ private fun AppSettings.toJson(): JSONObject = JSONObject().apply {
     put("batteryOptimizationDisabled", batteryOptimizationDisabled)
     put("autoStartOnBoot", autoStartOnBoot)
     put("diagnosticLogEnabled", diagnosticLogEnabled)
+    put("instantDownloadEnabled", instantDownloadEnabled)
 }
 
-private fun JSONObject.toAppSettings(current: AppSettings): AppSettings = current.copy(
+internal fun JSONObject.toAppSettings(current: AppSettings): AppSettings = current.copy(
     uploadSizeLimitBytes = if (isNull("uploadSizeLimitBytes")) null else optLong("uploadSizeLimitBytes"),
     downloadSizeLimitBytes = if (isNull("downloadSizeLimitBytes")) null else optLong("downloadSizeLimitBytes"),
     warnOnMobileNetwork = optBoolean("warnOnMobileNetwork", current.warnOnMobileNetwork),
@@ -193,6 +194,7 @@ private fun JSONObject.toAppSettings(current: AppSettings): AppSettings = curren
     batteryOptimizationDisabled = optBoolean("batteryOptimizationDisabled", current.batteryOptimizationDisabled),
     autoStartOnBoot = optBoolean("autoStartOnBoot", current.autoStartOnBoot),
     diagnosticLogEnabled = optBoolean("diagnosticLogEnabled", current.diagnosticLogEnabled),
+    instantDownloadEnabled = optBoolean("instantDownloadEnabled", current.instantDownloadEnabled),
 )
 
 private fun FolderPairEntity.toJson(accountDisplayName: String?, accountBaseUrl: String?): JSONObject = JSONObject().apply {

@@ -3,6 +3,7 @@ package org.vovchenko.webdavsync.sync.worker
 import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
+import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.Data
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -21,6 +22,10 @@ import org.vovchenko.webdavsync.data.local.settings.AppSettings
 import org.vovchenko.webdavsync.data.repository.SettingsRepository
 import org.vovchenko.webdavsync.sync.control.FollowUpRequest
 import org.vovchenko.webdavsync.sync.control.SyncControl
+import org.vovchenko.webdavsync.sync.control.UserSyncResult
+import org.vovchenko.webdavsync.sync.control.manualSyncWaitReasons
+import org.vovchenko.webdavsync.util.BatteryStatus
+import org.vovchenko.webdavsync.util.NetworkStatus
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -122,6 +127,48 @@ class SyncScheduler @Inject constructor(
     }
 
     /**
+     * Sync button and home-screen widget.
+     *
+     * A running pass is not cancelled: the tap becomes a follow-up. A `manual_sync` or `push_sync`
+     * that has not started is replaced with one request built from the current settings, so a job
+     * queued under older Wi-Fi or charging rules cannot block the button. `remoteChangePendingAt`
+     * is left set. Content watches, push registration, and push maintenance are not touched.
+     *
+     * [bypassUnmetered] is only for the explicit "sync now on mobile data" choice.
+     */
+    suspend fun enqueueUserSync(bypassUnmetered: Boolean): UserSyncResult {
+        if (syncControl.isSessionActive || isSyncWorkerRunning()) {
+            syncControl.requestFollowUpSync(null)
+            diagnosticLogger.i(TAG, "User sync during active session → follow-up")
+            return UserSyncResult.AlreadyRunning
+        }
+
+        val waitingPush = workInfos(SyncWorker.UNIQUE_PUSH_WORK_NAME).any { it.state.isWaiting() }
+        if (waitingPush) {
+            workManager.cancelUniqueWork(SyncWorker.UNIQUE_PUSH_WORK_NAME)
+        }
+        val replacedManual = hasActiveManualWork()
+        val settings = settingsRepository.settings.first()
+        workManager.enqueueUniqueWork(
+            SyncWorker.UNIQUE_MANUAL_WORK_NAME,
+            ExistingWorkPolicy.REPLACE,
+            buildManualSyncRequest(settings, bypassUnmetered = bypassUnmetered),
+        )
+        val reasons = manualSyncWaitReasons(
+            settings = settings,
+            onUnmeteredNetwork = NetworkStatus.hasUnmeteredInternet(context),
+            charging = BatteryStatus.isCharging(context),
+            bypassUnmetered = bypassUnmetered,
+        )
+        diagnosticLogger.i(
+            TAG,
+            "User sync queued replacedManual=$replacedManual replacedPush=$waitingPush " +
+                "bypassUnmetered=$bypassUnmetered waiting=$reasons",
+        )
+        return if (reasons.isEmpty()) UserSyncResult.Started else UserSyncResult.Waiting(reasons)
+    }
+
+    /**
      * Chains one full sync after the current unique manual work finishes.
      * Must not go through [enqueueImmediateSync] — that would see this worker still RUNNING and
      * only set the follow-up flag again (infinite deferral).
@@ -183,6 +230,68 @@ class SyncScheduler @Inject constructor(
             .setInitialDelay(INSTANT_POLL_DELAY_MINUTES, TimeUnit.MINUTES)
             .build()
 
+    /**
+     * A server change arrived by WebDAV-Push for [pairIds] (flags already persisted). During a
+     * session the pairs become follow-ups; otherwise one delayed `push_sync` collapses a burst.
+     * It follows the periodic battery rule and never bypasses Wi-Fi only or charging.
+     */
+    suspend fun enqueuePushSync(pairIds: Collection<Long>) {
+        if (syncControl.isSessionActive) {
+            pairIds.forEach { syncControl.requestFollowUpSync(it) }
+            // Re-check: a session that ended in between drops the follow-up, so enqueue instead.
+            if (syncControl.isSessionActive) {
+                diagnosticLogger.i(TAG, "Push change during active session → follow-up pairs=$pairIds")
+                return
+            }
+        }
+        val settings = settingsRepository.settings.first()
+        val request = OneTimeWorkRequestBuilder<SyncWorker>()
+            .setInputData(Data.Builder().putBoolean(SyncWorker.KEY_PUSH_PENDING, true).build())
+            .setInitialDelay(PUSH_SYNC_DELAY_SECONDS, TimeUnit.SECONDS)
+            .setConstraints(buildConstraints(settings, requireBatteryNotLow = !settings.syncEvenWhenBatteryLow))
+            .build()
+        workManager.enqueueUniqueWork(SyncWorker.UNIQUE_PUSH_WORK_NAME, ExistingWorkPolicy.KEEP, request)
+        diagnosticLogger.i(TAG, "Push sync queued pairs=$pairIds delay=${PUSH_SYNC_DELAY_SECONDS}s")
+    }
+
+    /**
+     * Queues `push_reconcile`. A queued run reads fresh state when it starts, so it absorbs this
+     * request; a running one gets exactly one run appended after it.
+     */
+    suspend fun enqueuePushReconcile() {
+        val infos = workInfos(PUSH_RECONCILE_WORK_NAME)
+        if (infos.any { it.state == WorkInfo.State.ENQUEUED || it.state == WorkInfo.State.BLOCKED }) return
+        val policy = if (infos.any { it.state == WorkInfo.State.RUNNING }) {
+            ExistingWorkPolicy.APPEND_OR_REPLACE
+        } else {
+            ExistingWorkPolicy.KEEP
+        }
+        val settings = settingsRepository.settings.first()
+        val request = OneTimeWorkRequestBuilder<PushReconcileWorker>()
+            .setConstraints(pushNetworkConstraints(settings, requireBatteryNotLow = false))
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, PUSH_RECONCILE_BACKOFF_MINUTES, TimeUnit.MINUTES)
+            .build()
+        workManager.enqueueUniqueWork(PUSH_RECONCILE_WORK_NAME, policy, request)
+    }
+
+    /** Daily push upkeep while the feature is on; UPDATE keeps the timer but refreshes constraints. */
+    suspend fun ensurePushMaintenance() {
+        val settings = settingsRepository.settings.first()
+        val request = PeriodicWorkRequestBuilder<PushMaintenanceWorker>(
+            PUSH_MAINTENANCE_INTERVAL_HOURS,
+            TimeUnit.HOURS,
+            PUSH_MAINTENANCE_FLEX_HOURS,
+            TimeUnit.HOURS,
+        )
+            .setConstraints(pushNetworkConstraints(settings, requireBatteryNotLow = true))
+            .build()
+        workManager.enqueueUniquePeriodicWork(PUSH_MAINTENANCE_WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
+    }
+
+    fun cancelPushMaintenance() {
+        workManager.cancelUniqueWork(PUSH_MAINTENANCE_WORK_NAME)
+    }
+
     fun cancelContentWatch(pairId: Long) {
         workManager.cancelUniqueWork(contentWatchName(pairId))
     }
@@ -222,14 +331,11 @@ class SyncScheduler @Inject constructor(
         }
     }
 
-    private fun hasActiveManualWork(): Boolean {
-        val infos = workInfos(SyncWorker.UNIQUE_MANUAL_WORK_NAME)
-        return infos.any {
-            it.state == WorkInfo.State.ENQUEUED ||
-                it.state == WorkInfo.State.RUNNING ||
-                it.state == WorkInfo.State.BLOCKED
-        }
-    }
+    private fun hasActiveManualWork(): Boolean =
+        workInfos(SyncWorker.UNIQUE_MANUAL_WORK_NAME).any { it.state.isWaiting() || it.state == WorkInfo.State.RUNNING }
+
+    private fun WorkInfo.State.isWaiting(): Boolean =
+        this == WorkInfo.State.ENQUEUED || this == WorkInfo.State.BLOCKED
 
     private fun hasRunningPeriodicWork(): Boolean =
         workInfos(SyncWorker.UNIQUE_PERIODIC_WORK_NAME).any { it.state == WorkInfo.State.RUNNING }
@@ -240,7 +346,8 @@ class SyncScheduler @Inject constructor(
      */
     fun isSyncWorkerRunning(): Boolean =
         workInfos(SyncWorker.UNIQUE_MANUAL_WORK_NAME).any { it.state == WorkInfo.State.RUNNING } ||
-            workInfos(SyncWorker.UNIQUE_PERIODIC_WORK_NAME).any { it.state == WorkInfo.State.RUNNING }
+            workInfos(SyncWorker.UNIQUE_PERIODIC_WORK_NAME).any { it.state == WorkInfo.State.RUNNING } ||
+            workInfos(SyncWorker.UNIQUE_PUSH_WORK_NAME).any { it.state == WorkInfo.State.RUNNING }
 
     /**
      * True only while a sync worker is **RUNNING**.
@@ -252,9 +359,11 @@ class SyncScheduler @Inject constructor(
     fun observeIsSyncActive(): Flow<Boolean> = combine(
         workManager.getWorkInfosForUniqueWorkFlow(SyncWorker.UNIQUE_MANUAL_WORK_NAME),
         workManager.getWorkInfosForUniqueWorkFlow(SyncWorker.UNIQUE_PERIODIC_WORK_NAME),
-    ) { manual, periodic ->
+        workManager.getWorkInfosForUniqueWorkFlow(SyncWorker.UNIQUE_PUSH_WORK_NAME),
+    ) { manual, periodic, push ->
         manual.any { it.state == WorkInfo.State.RUNNING } ||
-            periodic.any { it.state == WorkInfo.State.RUNNING }
+            periodic.any { it.state == WorkInfo.State.RUNNING } ||
+            push.any { it.state == WorkInfo.State.RUNNING }
     }
 
     private fun workInfos(uniqueName: String): List<WorkInfo> =
@@ -264,10 +373,17 @@ class SyncScheduler @Inject constructor(
     private fun buildManualSyncRequest(
         settings: AppSettings,
         inputData: Data = Data.EMPTY,
+        bypassUnmetered: Boolean = false,
     ) = OneTimeWorkRequestBuilder<SyncWorker>()
         .setInputData(inputData)
         // Manual / follow-up is user-initiated: do not block on battery-low (periodic still does).
-        .setConstraints(buildConstraints(settings, requireBatteryNotLow = false))
+        .setConstraints(
+            buildConstraints(
+                settings,
+                requireBatteryNotLow = false,
+                bypassUnmetered = bypassUnmetered,
+            ),
+        )
         .build()
 
     /**
@@ -293,6 +409,13 @@ class SyncScheduler @Inject constructor(
         const val CONTENT_WATCH_TAG = "content_watch"
         const val INSTANT_POLL_WORK_NAME = "instant_root_poll"
         const val INSTANT_POLL_DELAY_MINUTES = 2L
+        const val PUSH_RECONCILE_WORK_NAME = "push_reconcile"
+        const val PUSH_MAINTENANCE_WORK_NAME = "push_maintenance"
+        /** Collapses pushes that arrive seconds apart (e.g. nested roots queued separately). */
+        const val PUSH_SYNC_DELAY_SECONDS = 10L
+        private const val PUSH_RECONCILE_BACKOFF_MINUTES = 2L
+        private const val PUSH_MAINTENANCE_INTERVAL_HOURS = 24L
+        private const val PUSH_MAINTENANCE_FLEX_HOURS = 6L
         private const val CONTENT_WATCH_NAME_PREFIX = "content_watch_"
         private const val ContentResolverScheme = "content"
         /** Batch a burst of file notifications into one wake. */
@@ -314,10 +437,23 @@ class SyncScheduler @Inject constructor(
             return flex.coerceAtMost(interval - 1).toLong()
         }
 
-        fun buildConstraints(settings: AppSettings, requireBatteryNotLow: Boolean): Constraints =
+        fun buildConstraints(
+            settings: AppSettings,
+            requireBatteryNotLow: Boolean,
+            bypassUnmetered: Boolean = false,
+        ): Constraints =
+            Constraints.Builder()
+                .setRequiredNetworkType(
+                    if (settings.wifiOnly && !bypassUnmetered) NetworkType.UNMETERED else NetworkType.CONNECTED,
+                )
+                .setRequiresCharging(settings.onlyWhileCharging)
+                .setRequiresBatteryNotLow(requireBatteryNotLow)
+                .build()
+
+        /** Registration traffic follows Wi-Fi only but not the charging rule (plan D14). */
+        fun pushNetworkConstraints(settings: AppSettings, requireBatteryNotLow: Boolean): Constraints =
             Constraints.Builder()
                 .setRequiredNetworkType(if (settings.wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED)
-                .setRequiresCharging(settings.onlyWhileCharging)
                 .setRequiresBatteryNotLow(requireBatteryNotLow)
                 .build()
 

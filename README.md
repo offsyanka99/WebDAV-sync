@@ -2,7 +2,7 @@
 
 Android app that keeps local folders and WebDAV remote folders in sync — manually, on a schedule, or when files change.
 
-**Current release:** [v1.1.6](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.1.6)  
+**Current release:** [v1.2.1](https://github.com/offsyanka99/WebDAV-sync/releases/tag/v1.2.1)  
 **Min Android:** 8.0 (API 26)  
 **License:** [MIT](LICENSE)
 
@@ -16,6 +16,7 @@ Android app that keeps local folders and WebDAV remote folders in sync — manua
   - **To the cloud** — local → remote only
 - **Background sync** via WorkManager (periodic + manual + boot reschedule), with a flex window and “battery not low” by default
 - **Instant upload** when local changes are detected (optional per pair). A folder-root check runs about every 90 seconds while the app is open and every 2 minutes in the background, because some storage providers never send a change notification. A change during a pass is coalesced instead of interrupting it. Off by default on new installs
+- **Instant download (WebDAV-Push, optional)** — the server notifies the phone when files change in a synced folder, and that folder pair syncs within seconds instead of waiting for the next scheduled check. Push service: the built-in **Google Play (FCM)** option on phones with Google Play services, or a [UnifiedPush](https://unifiedpush.org/) app such as ntfy (no Google). Needs a server with WebDAV-Push for files, such as [AngaraDAV](https://github.com/offsyanka99/AngaraDAV) 2.5.3+. To-cloud pairs are not subscribed. Off by default
 - **Battery saver profile** (Wi‑Fi only, charging only, 3-hour interval, no global sync-on-local-change). A folder’s Instant upload checkbox still watches that folder
 - **Foreground notification** with pause / resume / cancel only while a pass is talking to the server
 - **Live Recent changes on Overview** while a pass is running (upload / download / delete counts, no DB write per file)
@@ -28,6 +29,24 @@ Android app that keeps local folders and WebDAV remote folders in sync — manua
 - **Backup & restore** of accounts and folder-pair configuration
 - **Optional custom CA** for self-signed / private servers
 - **Diagnostic logging** (redacted) for troubleshooting
+
+## Recommended server: AngaraDAV
+
+[AngaraDAV](https://github.com/offsyanka99/AngaraDAV) is a self-hosted server for calendars, contacts, tasks, notes, and private files (CalDAV, CardDAV, and WebDAV) with a browser portal. It supports WebDAV-Push for all of its services: calendars and address books (for clients such as DAVx⁵) and, since 2.5.3, file storage. With file push turned on (**System settings → Enable WebDAV-Push for file storage**), changes made through any WebDAV client or the AngaraDAV portal reach WebDAV-sync within seconds. Docker images: `ghcr.io/offsyanka99/angaradav`.
+
+WebDAV-sync works with any WebDAV server. Instant download needs a server that implements WebDAV-Push for files; on other servers the app falls back to scheduled sync.
+
+## How sync works with WebDAV-Push
+
+A folder pair still syncs the same way no matter what started the pass: the app compares the local folder and the server folder with the last baseline, then uploads, downloads, or deletes. WebDAV-Push only decides **when** a server-side change starts that pass.
+
+With **Download server changes instantly** off, server changes wait for the next scheduled sync, or for you to tap Sync. Local changes still use Instant upload or “Sync immediately on local changes” when those are on.
+
+With it on, each enabled two-way or to-device folder is subscribed on the server. To-cloud folders are not: they never download server-only files. When someone adds, changes, or deletes a file on the server (another device, the AngaraDAV portal, or any WebDAV client), the server sends an encrypted notification. The phone marks that folder as having a server change and starts a sync about 10 seconds later. The wait lets several notifications collapse into one pass. That pass does not skip the server listing, so the new or deleted file is applied. A two-way or to-device pair downloads a file that exists only on the server. The app’s own uploads and deletes are marked so they do not notify this phone again.
+
+Push-started syncs follow Wi-Fi only, Only while charging, and the battery-not-low rule. They do not bypass those. If a sync is already running, the notification waits and is included when that pass finishes. Scheduled auto-sync keeps running, so a notification lost while the phone is offline is still picked up later.
+
+Tap **Sync** to run now. A pass that is already transferring files is left alone. A sync that is only waiting (including one started by a push) is replaced with a new request that uses the current Wi-Fi and charging settings. On mobile data with Wi-Fi only turned on, the app asks before that one sync uses the cellular network.
 
 ## Screens
 
@@ -43,6 +62,7 @@ Android app that keeps local folders and WebDAV remote folders in sync — manua
 2. Open **Settings → Accounts** (or add an account when creating a folder pair) and enter your WebDAV URL, username, and password.
 3. On **Folders**, add a folder pair: pick the remote path, local folder (SAF), and sync method.
 4. Tap **Sync** on Overview, or wait for the scheduled interval / instant upload.
+5. Optional: to get server changes right away, open **Settings → Synchronization → Download server changes instantly (WebDAV-Push)**. In the dialog, turn it on and pick the push service: **Google Play (FCM)** (default, needs Google Play services) or an installed UnifiedPush app such as ntfy. The Folders list and the folder pair editor show whether push is active for each folder, or why it failed.
 
 Default remote path suggestion: `/Webdavsync`.
 
@@ -91,6 +111,7 @@ keyPassword=...
 | Sync | WorkManager foreground worker, three-way diff, SAF I/O |
 | WebDAV | Sardine-Android (OkHttp): PROPFIND, PUT, GET, DELETE, MKCOL, quota |
 | Storage | Room (pairs, baseline, logs), EncryptedSharedPreferences (secrets) |
+| Push | UnifiedPush connector + embedded FCM distributor (Web Push, RFC 8291), WebDAV-Push draft (discover, register, `Push-Dont-Notify`) |
 
 Core flow: scan local + remote → diff against last-sync baseline → transfer/delete → update baseline → log session totals for **Recent changes**.
 
@@ -99,6 +120,7 @@ Core flow: scan local + remote → diff against last-sync baseline → transfer/
 - Credentials stay on device (encrypted).
 - No analytics or third-party tracking SDKs in this project.
 - Network traffic only goes to the WebDAV servers you configure.
+- With WebDAV-Push on, your WebDAV server sends change notifications through the push service you pick: Google's FCM (built-in option, uses Google Play services) or the server of your UnifiedPush app (for example ntfy.sh or your own). Notifications are end-to-end encrypted (RFC 8291). The push service sees when they arrive and an opaque folder ID, never file names or contents. The FCM option uses an open-source library without the Firebase SDK; pick a UnifiedPush app to keep Google out entirely.
 
 ## Contact
 
@@ -106,6 +128,17 @@ Core flow: scan local + remote → diff against last-sync baseline → transfer/
 - **Issues:** [GitHub Issues](https://github.com/offsyanka99/WebDAV-sync/issues)
 
 ## Changelog (recent)
+
+### v1.2.1
+
+- **Instant download with WebDAV-Push (optional, off by default).** When a file changes on the server — from another device, the web portal, or any WebDAV client — the server notifies the phone and the matching folder pair syncs about 10 seconds later. Turn it on in **Settings → Synchronization** and pick the push service: built-in **Google Play (FCM)** (default) or a UnifiedPush app such as ntfy. Needs a server with WebDAV-Push for files ([AngaraDAV](https://github.com/offsyanka99/AngaraDAV) 2.5.3+).
+- **No echoes.** The app’s own uploads and deletes do not come back to it as notifications.
+- **Same rules as scheduled sync.** Push-started syncs wait for Wi‑Fi, charging, and battery like automatic sync does. Scheduled sync keeps running as a safety net, because a push can be lost while the phone is offline.
+- **Push status per folder.** The folder pair editor shows “Server push: active until …”, “not supported by this server”, and similar.
+- **Sync runs now.** The Sync button and the home-screen widget replace a manual or push sync that is still waiting, using the current Wi-Fi and charging settings. A pass that is already transferring files is left alone. On mobile data with Wi-Fi only on, the app asks before that one sync uses cellular.
+- **Adding an account no longer crashes** after a successful connection test. Closing the HTTP connections stays off the main thread.
+- Subscriptions are renewed during normal syncs and removed when push is turned off, a folder pair changes, or an account is deleted.
+- Database upgrades from v1.1.6 automatically (schema 5).
 
 ### v1.1.6
 

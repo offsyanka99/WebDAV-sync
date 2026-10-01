@@ -33,4 +33,20 @@ interface FolderPairDao {
 
     @Query("DELETE FROM folder_pairs")
     suspend fun deleteAll()
+
+    @Query("SELECT remoteChangePendingAt FROM folder_pairs WHERE id = :id")
+    suspend fun getRemoteChangePendingAt(id: Long): Long?
+
+    @Query("UPDATE folder_pairs SET remoteChangePendingAt = :at WHERE id IN (:ids)")
+    suspend fun markRemoteChangePending(ids: Collection<Long>, at: Long)
+
+    /** Clears only pushes that arrived before the remote walk started. */
+    @Query(
+        "UPDATE folder_pairs SET remoteChangePendingAt = NULL " +
+            "WHERE id = :id AND remoteChangePendingAt <= :scanStartedAt",
+    )
+    suspend fun clearRemoteChangePending(id: Long, scanStartedAt: Long)
+
+    @Query("SELECT * FROM folder_pairs WHERE remoteChangePendingAt IS NOT NULL AND enabled = 1")
+    suspend fun getRemoteChangePending(): List<FolderPairEntity>
 }

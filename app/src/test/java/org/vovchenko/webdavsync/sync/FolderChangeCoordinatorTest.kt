@@ -1,5 +1,6 @@
 package org.vovchenko.webdavsync.sync
 
+import android.app.job.JobScheduler
 import android.content.Context
 import android.net.Uri
 import androidx.room.Room
@@ -50,9 +51,12 @@ class FolderChangeCoordinatorTest {
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
-        if (!WorkManager.isInitialized()) {
-            WorkManagerTestInitHelper.initializeTestWorkManager(context)
+        // A WorkManager left by an earlier test class is bound to that test's application.
+        if (WorkManager.isInitialized()) {
+            runCatching { WorkManagerTestInitHelper.closeWorkDatabase() }
         }
+        context.getSystemService(JobScheduler::class.java)?.cancelAll()
+        WorkManagerTestInitHelper.initializeTestWorkManager(context)
         workManager = WorkManager.getInstance(context)
         settingsRepository = SettingsRepository(SettingsDataStore(context))
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)

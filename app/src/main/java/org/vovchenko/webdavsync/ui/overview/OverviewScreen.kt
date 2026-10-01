@@ -10,6 +10,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -17,11 +19,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import org.vovchenko.webdavsync.domain.sync.SyncStatusDisplay
+import org.vovchenko.webdavsync.sync.control.SyncUserMessage
 import org.vovchenko.webdavsync.ui.components.Formatters
 import org.vovchenko.webdavsync.ui.components.LabeledRow
 import org.vovchenko.webdavsync.ui.components.SectionCard
@@ -40,7 +44,15 @@ fun OverviewScreen(
     onRequestSyncOnStartConsumed: () -> Unit = {},
 ) {
     val uiState by viewModel.uiState.collectAsState()
-    val showMobileWarning by viewModel.showMobileDataWarning.collectAsState()
+    val syncDialog by viewModel.syncDialog.collectAsState()
+    val syncNotice by viewModel.syncNotice.collectAsState()
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    LaunchedEffect(syncNotice?.id) {
+        val notice = syncNotice ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(notice.text)
+        viewModel.consumeSyncNotice()
+    }
 
     LaunchedEffect(requestSyncOnStart) {
         if (requestSyncOnStart) {
@@ -51,6 +63,7 @@ fun OverviewScreen(
 
     Scaffold(
         modifier = modifier,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = { WebDavSyncTitle() },
@@ -119,7 +132,7 @@ fun OverviewScreen(
         }
     }
 
-    if (showMobileWarning) {
+    if (syncDialog == OverviewSyncDialog.MobileData) {
         AlertDialog(
             onDismissRequest = viewModel::dismissMobileDataWarning,
             title = { Text("Sync on mobile data?") },
@@ -131,6 +144,19 @@ fun OverviewScreen(
             },
             dismissButton = {
                 TextButton(onClick = viewModel::dismissMobileDataWarning) { Text("Cancel") }
+            },
+        )
+    }
+    if (syncDialog == OverviewSyncDialog.UnmeteredOverride) {
+        AlertDialog(
+            onDismissRequest = viewModel::waitForWifi,
+            title = { Text("Sync on mobile data?") },
+            text = { Text(SyncUserMessage.UNMETERED_OVERRIDE) },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmSyncOnMobileData) { Text("Sync now") }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::waitForWifi) { Text("Wait for Wi-Fi") }
             },
         )
     }

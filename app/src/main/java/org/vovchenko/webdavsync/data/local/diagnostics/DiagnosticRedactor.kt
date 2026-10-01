@@ -17,6 +17,12 @@ object DiagnosticRedactor {
         Regex("""(?i)\b(Bearer)\s+[A-Za-z0-9._\-+/=]{8,}""")
     private val urlUserInfo =
         Regex("""(://)([^/\s:@]+):([^/\s@]+)@""")
+    private val pushRegistrationToken =
+        Regex("""(push-subscriptions/)[A-Za-z0-9_\-]+""")
+    private val pushSecretElement =
+        Regex("""(?i)(<(?:[\w.\-]+:)?(?:push-resource|auth-secret|subscription-public-key)\b[^>]*>)[^<]*""")
+    private val pushDontNotifyHeader =
+        Regex("""(?i)(Push-Dont-Notify\s*:\s*)[^\r\n]+""")
 
     fun redact(message: String): String {
         var result = message
@@ -25,6 +31,9 @@ object DiagnosticRedactor {
         result = basicToken.replace(result, "$1 ***")
         result = bearerToken.replace(result, "$1 ***")
         result = urlUserInfo.replace(result, "$1$2:***@")
+        result = pushRegistrationToken.replace(result, "$1***")
+        result = pushSecretElement.replace(result, "$1***")
+        result = pushDontNotifyHeader.replace(result, "$1***")
         return result
     }
 }

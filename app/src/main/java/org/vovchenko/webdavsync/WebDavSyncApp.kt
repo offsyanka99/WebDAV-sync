@@ -8,6 +8,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import org.vovchenko.webdavsync.data.local.diagnostics.DiagnosticLogger
+import org.vovchenko.webdavsync.push.PushCoordinator
 import org.vovchenko.webdavsync.sync.FolderChangeCoordinator
 import org.vovchenko.webdavsync.sync.worker.SyncScheduler
 import javax.inject.Inject
@@ -20,6 +21,7 @@ class WebDavSyncApp : Application(), Configuration.Provider {
     /** Eager init so the settings collector starts with the process. */
     @Inject lateinit var diagnosticLogger: DiagnosticLogger
     @Inject lateinit var folderChangeCoordinator: FolderChangeCoordinator
+    @Inject lateinit var pushCoordinator: PushCoordinator
 
     override val workManagerConfiguration: Configuration
         get() = Configuration.Builder()
@@ -34,5 +36,6 @@ class WebDavSyncApp : Application(), Configuration.Provider {
             diagnosticLogger.i("App", "Process start version=${BuildConfig.VERSION_NAME}")
         }
         folderChangeCoordinator.start()
+        pushCoordinator.start()
     }
 }

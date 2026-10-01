@@ -57,4 +57,21 @@ object NetworkStatus {
 
         return hasCellular && !hasWifiOrEthernet
     }
+
+    /**
+     * True when some network is internet-validated and unmetered.
+     * Matches WorkManager [androidx.work.NetworkType.UNMETERED].
+     */
+    fun hasUnmeteredInternet(context: Context): Boolean {
+        val cm = context.getSystemService(ConnectivityManager::class.java) ?: return false
+        if (cm.allNetworks.any { isUnmeteredInternet(cm.getNetworkCapabilities(it)) }) return true
+        return isUnmeteredInternet(cm.getNetworkCapabilities(cm.activeNetwork))
+    }
+
+    private fun isUnmeteredInternet(caps: NetworkCapabilities?): Boolean {
+        if (caps == null) return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
 }

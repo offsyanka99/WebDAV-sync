@@ -1,9 +1,9 @@
 # WebDAV-sync architecture
 
 **App:** `org.vovchenko.webdavsync`  
-**Version documented:** 1.1.6 (`versionCode` 16)  
+**Version documented:** 1.2.1 (`versionCode` 18)  
 **Platform:** Android 8.0+ (minSdk 26, compileSdk 37, targetSdk 35)  
-**Date:** 2026-09-26
+**Date:** 2026-10-01
 
 This document describes the app as it is implemented in `app/src`. It is the map of processes, data, and the sync pipeline. Defects and recommended changes are recorded separately in `doc/review.md` (kept out of version control).
 
@@ -11,7 +11,7 @@ This document describes the app as it is implemented in `app/src`. It is the map
 
 WebDAV-sync keeps one or more local folders aligned with folders on WebDAV servers. Each link is a **folder pair**: a Storage Access Framework (SAF) tree, a remote path on one account, and a sync method.
 
-A pass can be started by the user, by a periodic WorkManager job, or by a local-change watch. One pass scans the local tree and (usually) the remote tree, compares both to a per-file baseline, then uploads, downloads, or deletes. Credentials never go in the database. The only network endpoints are the WebDAV servers the user adds.
+A pass can be started by the user, by a periodic WorkManager job, by a local-change watch, or (when WebDAV-Push is on) by a server notification. One pass scans the local tree and (usually) the remote tree, compares both to a per-file baseline, then uploads, downloads, or deletes. Credentials never go in the database. The only network endpoints the app contacts are the WebDAV servers the user adds; push notifications arrive through the chosen push service, either Google's FCM via the built-in distributor or the user's UnifiedPush app (§16).
 
 ```mermaid
 flowchart LR
@@ -52,9 +52,10 @@ flowchart LR
 | Language / JDK | Kotlin, JVM target 17 |
 | UI | Jetpack Compose, Material 3, Navigation Compose |
 | DI | Hilt 2.60 (`@HiltAndroidApp`, `@HiltViewModel`, `@HiltWorker`) |
-| Database | Room 2.8 (SQLite), schema version 3, schema JSON under `app/schemas` |
+| Database | Room 2.8 (SQLite), schema version 5, schema JSON under `app/schemas` |
 | Settings | DataStore Preferences (`settings`) |
-| Secrets | `androidx.security:security-crypto` EncryptedSharedPreferences, AES-256 |
+| Secrets | `androidx.security:security-crypto` EncryptedSharedPreferences, AES-256 (Tink resolved to `tink-android` 1.23.0) |
+| Push | UnifiedPush connector 3.3.5 (Web Push RFC 8030/8291/8292) plus `embedded-fcm-distributor` 3.1.0 (FOSS, no Firebase SDK; talks to Google Play services over IPC, endpoints on `fcm.googleapis.com`, VAPID required). The connector's `tink` dependency is substituted with `tink-android` in `app/build.gradle.kts` |
 | Background work | WorkManager 2.11, foreground service type `dataSync` |
 | HTTP / WebDAV | OkHttp 4.12, sardine-android 0.9, okhttp-digest 3.1 |
 | Local files | SAF `DocumentFile` only. No `MANAGE_EXTERNAL_STORAGE` |
@@ -75,15 +76,18 @@ app/src/main/java/org/vovchenko/webdavsync/
   data/model/               SyncMethod, AuthScheme, SyncEventType
   data/local/               Room entities/DAOs, SAF, settings, credentials, diagnostics
   data/remote/              WebDavClient, Sardine adapter, auth, TLS, path checks
-  data/repository/          account, folder pair, baseline, logs, connection, settings
-  sync/worker/              SyncWorker, scheduler, boot receiver, content watch
+  data/remote/push/         WebDAV-Push XML, header validation, Push-Dont-Notify, same-origin
+  data/local/push/          push registration and endpoint tables
+  data/repository/          account, folder pair, baseline, logs, connection, settings, push
+  push/                     WebDAV-Push: planner, manager, event handler, coordinator, service, status
+  sync/worker/              SyncWorker, scheduler, boot receiver, content watch, push workers
   sync/control/             single-flight session, pause/cancel, live progress
   sync/service/             foreground notification
   widget/                   4×1 home-screen widget
   util/                     network status, relative path join
 ```
 
-Tests are unit tests under `app/src/test` (Robolectric available) plus a small `androidTest` placeholder.
+Tests are unit tests under `app/src/test` (Robolectric available; `robolectric.properties` uses a plain `Application` so the real app's coordinators do not start) plus a small `androidTest` placeholder.
 
 ## 4. Process entry and Android components
 
@@ -93,6 +97,7 @@ On every process start the app:
 
 1. Reschedules periodic sync from the current DataStore settings (`ExistingPeriodicWorkPolicy.UPDATE`).
 2. Starts `FolderChangeCoordinator`, which watches folder pairs that opted into instant upload.
+3. Starts `PushCoordinator`, which keeps WebDAV-Push registrations in line with the pairs and settings (§16).
 
 Manifest components:
 
@@ -104,6 +109,14 @@ Manifest components:
 | `SyncWidgetProvider` | yes | App widget update and `ACTION_SYNC_NOW` |
 | `SystemForegroundService` | merged | `foregroundServiceType=dataSync` while a pass is on the network |
 | `FileProvider` | no | Shares only `files/diagnostics/` |
+| `WebDavPushService` | no | UnifiedPush events (`PUSH_EVENT`), bound only by the connector inside the app |
+| `MessagingReceiverImpl` (library) | yes | Receives distributor broadcasts. Drops any broadcast without the per-registration token only the distributor holds |
+| `RaiseToForegroundService` (library) | yes | Lets the distributor raise process priority. Binds an empty `Binder` |
+| `LinkActivity` (library) | no | Distributor picker deeplink (unused; the app has its own dialog) |
+| `FirebaseReceiver` (embedded FCM) | yes, `c2dm.permission.SEND` | FCM registration results and messages; only Google Play services holds the permission |
+| `UnifiedPushReceiver` (embedded FCM) | no | The built-in distributor's side of `REGISTER` / `UNREGISTER` |
+
+The connector also adds `<queries>` for the distributor `LINK`, `REGISTER`, and `UNREGISTER` actions.
 
 Permissions: `INTERNET`, `ACCESS_NETWORK_STATE`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_DATA_SYNC`, `POST_NOTIFICATIONS`, `RECEIVE_BOOT_COMPLETED`, `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`.
 
@@ -169,20 +182,25 @@ Repositories are thin:
 | `manual_sync` | one-shot `SyncWorker` | Overview, widget, follow-up, instant upload |
 | `content_watch_{pairId}` | one-shot `ContentWatchWorker` | SAF content-URI trigger for instant upload. Starts a sync only when the root snapshot changed |
 | `instant_root_poll` | one-shot `InstantRootPollWorker`, re-armed every 2 minutes | Instant upload is on. Compares the root snapshot even if the provider never notifies |
+| `push_sync` | one-shot `SyncWorker` (`push_pending`), `KEEP`, 10 s initial delay | A WebDAV-Push message for a subscribed folder. Targets the pairs whose `remoteChangePendingAt` is set when the session starts |
+| `push_reconcile` | one-shot `PushReconcileWorker`, exponential backoff | Desired push registrations changed, a new endpoint arrived, or the push service was (re)chosen |
+| `push_maintenance` | periodic `PushMaintenanceWorker`, 24 h | WebDAV-Push is on. Distributor check, due renewals, weekly VAPID check |
 
 Constraints (periodic and manual):
 
 - Network: `UNMETERED` when “Wi-Fi only” is on, otherwise `CONNECTED`
 - Charging: when “Only while charging” is on
 - Battery not low: periodic only, unless “Sync even when battery is low” is on. Manual and follow-up ignore battery-low
+- `push_sync` uses the periodic rule (network, charging, battery). `push_reconcile` and `push_maintenance` use only the network type (plus battery-not-low for maintenance)
+- The Sync button and the widget call `enqueueUserSync`. A running pass is left alone and the tap becomes a follow-up. A `manual_sync` or `push_sync` that has not started is replaced with one request built from the current settings. Wi-Fi only and charging still apply. On cellular with Wi-Fi only, Overview asks before that one sync uses mobile data. A sync that is only waiting shows why (Wi-Fi, charging, or both)
 
 `SyncControl` is an in-process single-flight gate. `tryBeginSession()` uses an `AtomicBoolean` so a periodic worker and a manual worker cannot both transfer. The loser asks for a follow-up of the pairs it was going to sync and returns success. A change that arrives while a pass is only queued does not set that flag. Pause polls every 200 ms. Cancel clears pause so waiters wake up.
 
-`SyncWorker` promotes to a foreground notification only when `SyncEngine` is about to do remote I/O (`onNeedsForeground`). A pass that transfers nothing never shows a notification and does not overwrite Last sync or Duration.
+`SyncWorker` promotes to a foreground notification only when `SyncEngine` is about to do remote I/O (`onNeedsForeground`). A pass that transfers nothing never shows a notification and does not overwrite Last sync or Duration. “Syncing” on Overview and the widget counts a `RUNNING` `manual_sync`, `periodic_sync`, or `push_sync`.
 
 ## 6. Data model
 
-Database name: `webdav_sync.db`. Version 4. `MIGRATION_1_2` adds `folder_pairs.lastLocalFingerprint`. `MIGRATION_2_3` adds `folder_pairs.lastRemoteScanAt`, `sync_file_state.lastSyncedEtag`, and `sync_file_state.isDirectory`. `MIGRATION_3_4` adds `folder_pairs.lastCheapFingerprint`, `lastFullLocalScanAt`, and `lastContentHashSweepAt`. Schema JSON is exported under `app/schemas`. Room enables foreign keys. There is no destructive fallback: a future version bump needs an explicit migration.
+Database name: `webdav_sync.db`. Version 5. `MIGRATION_1_2` adds `folder_pairs.lastLocalFingerprint`. `MIGRATION_2_3` adds `folder_pairs.lastRemoteScanAt`, `sync_file_state.lastSyncedEtag`, and `sync_file_state.isDirectory`. `MIGRATION_3_4` adds `folder_pairs.lastCheapFingerprint`, `lastFullLocalScanAt`, and `lastContentHashSweepAt`. `MIGRATION_4_5` adds `folder_pairs.remoteChangePendingAt` and the `push_registrations` and `push_endpoints` tables (§6.7). Schema JSON is exported under `app/schemas`. Room enables foreign keys. There is no destructive fallback: a future version bump needs an explicit migration.
 
 ### 6.1 `webdav_accounts`
 
@@ -212,6 +230,7 @@ Username, password, and custom CA bytes are **not** columns.
 | `enabled` | Disabled pairs are skipped by the worker |
 | `lastSyncAt`, `lastSyncDurationMs`, `lastSyncStatus` | Shown on Overview via the most recently finished pair |
 | `lastLocalFingerprint` | Full-tree fingerprint after a successful to-cloud scan. Used to skip the next remote scan |
+| `remoteChangePendingAt` | Time of the last unconsumed WebDAV-Push for this pair. Non-null disables both idle shortcuts. Written only by `markRemoteChangePending` and the compare-and-clear `clearRemoteChangePending(scanStartedAt)`; `FolderPairRepository.update` re-reads it so whole-row writes from stale copies keep it |
 
 ### 6.3 `sync_file_state` (baseline)
 
@@ -249,6 +268,7 @@ Stored in DataStore. Defaults for a new install:
 | Retry attempts / wait | 3 / 1 minute |
 | Auto-start after reboot | off |
 | Diagnostic log | off |
+| Download server changes instantly (WebDAV-Push) | off. Changed only through the WebDAV-Push dialog, which also stores the chosen push service. Exported in the UI backup JSON; the battery-saver profile leaves it alone |
 
 “Battery saver profile” sets Wi-Fi only, charging only, 180-minute interval, auto-sync on, immediate-on-change off, battery-low sync off. A folder pair’s Instant upload checkbox still registers watches.
 
@@ -256,8 +276,16 @@ Stored in DataStore. Defaults for a new install:
 
 - `CredentialStore`: EncryptedSharedPreferences file `webdav_credentials`, keys `account_{id}_username` / `account_{id}_password`. Writes use `apply()`.
 - `TrustedCertStore`: raw bytes in `files/trusted_certs/{id}.cert`. Not secret, but excluded from backup. The bytes are added as an extra trust anchor for that account’s OkHttp client, on top of the system CAs.
-- Android backup (`backup_rules.xml`, `data_extraction_rules.xml`) excludes the credential prefs, `trusted_certs/`, the Room database (including `-wal` / `-shm`), and the DataStore directory. `allowBackup` is true for everything else.
-- User-facing backup JSON (Settings → Backup) stores settings and folder pairs (name, account display name, base URL, remote path, SAF URI, method, exclusions, flags). It does not store passwords, certificates, or baselines.
+- Android backup (`backup_rules.xml`, `data_extraction_rules.xml`) excludes the credential prefs, `trusted_certs/`, the Room database (including `-wal` / `-shm`), the DataStore directory, and the UnifiedPush connector state (`database/unifiedpush-connector`, its journal, `sharedpref/unifiedpush.connector.xml`, and the embedded FCM distributor's `sharedpref/UP-embedded_fcm.xml`). `allowBackup` is true for everything else.
+- User-facing backup JSON (Settings → Backup) stores settings and folder pairs (name, account display name, base URL, remote path, SAF URI, method, exclusions, flags). It does not store passwords, certificates, baselines, or any push endpoint, key, or registration.
+
+### 6.7 `push_registrations` and `push_endpoints`
+
+`push_registrations`: one row per distinct `(accountId, sanitized remotePath)` of eligible pairs (unique index; second index on `(accountId, topic)`). The pairs a row serves are computed from `folder_pairs`, not stored. Columns: `state` (`DISCOVER`, `UNSUPPORTED`, `WAITING_FOR_ROOT`, `WAITING_FOR_ENDPOINT`, `ACTIVE`, `FAILED`, `PENDING_DELETE`), `topic`, `advertisedDepth`, `vapidPublicKey`, `registrationUrl` (exact validated `Location`), `endpointUrl`, `expiresAt`, `registeredAt`, `lastError` (user-safe, no URLs), `nextAttemptAt`, `lastCheckedAt` (last capability PROPFIND).
+
+`push_endpoints`: one row per account (`instance = account-{id}`): `state` (`REQUESTED`, `READY`, `FAILED`, `UNREGISTERED`), `vapidPublicKey` it was requested with, `endpointUrl`, `pubKey`, `authSecret`, `temporary`, `lastError`, `updatedAt`. The Web Push private key stays in the connector's `KeyManager`.
+
+Both tables cascade on account delete. Entity `toString()` leaves out URLs and keys.
 
 ## 7. Sync pipeline
 
@@ -331,7 +359,7 @@ Two different fingerprints exist:
 - file mtimes are real (none are 0)
 - the last PROPFIND walk was under 24 hours ago
 
-Then the engine does not open a socket, does not PROPFIND, does not MKCOL, and does not show a notification. It also does not overwrite Last sync or Duration. A remote-only edit waits until that 24-hour cap. A later pass that only re-baselines matching files (`RememberInSync`) is treated the same way: fingerprints are kept, Last sync and Duration stay on the last pass that actually transferred.
+Then the engine does not open a socket, does not PROPFIND, does not MKCOL, and does not show a notification. It also does not overwrite Last sync or Duration. A remote-only edit waits until that 24-hour cap, unless WebDAV-Push set `remoteChangePendingAt`: a pending push disables this skip and the full-walk skip (§7.2). The flag is cleared right after a successful remote scan, only if the push is not newer than the scan start. A failed scan leaves it set. A later pass that only re-baselines matching files (`RememberInSync`) is treated the same way: fingerprints are kept, Last sync and Duration stay on the last pass that actually transferred.
 
 `canSkipEnsureRemote` skips MKCOL when the last status is already `OK`, on the assumption the remote root was created last time.
 
@@ -432,7 +460,7 @@ After a non-cancelled pass, if the pair allows it, `IdleSyncPolicy.ancestorDirec
 
 ### 7.9 WebDAV operations
 
-`WebDavClient` surface: `testConnection`, `list`, `upload`, `download`, `delete`, `createDirectory`, `exists`, `getQuota`.
+`WebDavClient` surface: `testConnection`, `list`, `upload`, `download`, `delete`, `createDirectory`, `move`, `exists`, `getQuota`, plus `discoverPush`, `registerPush`, `unregisterPush`, and `setPushDontNotify` (§16).
 
 `WebDavClientFactory` builds one OkHttp client per account for a sync pass (`WebDavClientSession`), and closes it when the pass ends so idle sockets do not keep the radio up. A derived client shares that pool for listings and other metadata calls, with a 60-second call timeout. Body transfers use the shared client with:
 
@@ -471,6 +499,11 @@ flowchart TD
     gate -->|won| engine[SyncEngine for each pair]
     engine --> flag2{Follow-up flag?}
     flag2 -->|yes| manual
+    push[WebDAV-Push message] --> mark[Set remoteChangePendingAt]
+    mark --> busy2{Session active?}
+    busy2 -->|yes| flag
+    busy2 -->|no| pushsync[push_sync, 10 s delay]
+    pushsync --> gate
 ```
 
 Instant watch is on for an enabled pair when its Instant upload checkbox is on, or when global auto-sync and “sync immediately on local changes” are both on and the battery-saver profile is not (`InstantWatchPolicy`). The checkbox still watches while battery saver is on.
@@ -484,9 +517,11 @@ Watch layers, cheapest signal first:
 
 During an active session, local changes do not cancel the pass. They set the follow-up flag and refresh the in-memory fingerprint so the poller does not immediately fire again. After the pass, `reseedAfterSync` updates fingerprints and starts a 15 s per-pair cooldown so the files the sync itself just wrote are not treated as a new user edit.
 
-`enqueueImmediateSync` uses `ExistingWorkPolicy.KEEP` and will not `REPLACE` a running pass. A follow-up is recorded only while a session is already active, and it names the pair that changed. A manual job that is only queued is left alone, because that pass has not scanned yet. The follow-up is enqueued from the worker `finally` block with `APPEND_OR_REPLACE` on `manual_sync`, which is a different unique name from the periodic job.
+`enqueueImmediateSync` (folder watch, instant upload, follow-up) uses `ExistingWorkPolicy.KEEP` and will not `REPLACE` a running pass. A follow-up is recorded only while a session is already active, and it names the pair that changed. A manual job that is only queued is left alone by those automatic callers, because that pass has not scanned yet. The follow-up is enqueued from the worker `finally` block with `APPEND_OR_REPLACE` on `manual_sync`, which is a different unique name from the periodic job.
 
-Mobile-data warning (`ManualSyncStarter`) applies only to Overview and the widget. Scheduled sync and instant upload do not show it. “Wi-Fi only” is the control that actually withholds those transfers.
+`enqueueUserSync` (Overview Sync and the widget) does replace a `manual_sync` or `push_sync` that is `ENQUEUED` or `BLOCKED`, using the settings at the moment of the tap. It does not cancel a running worker, a content watch, `push_reconcile`, or `push_maintenance`, and it does not clear `remoteChangePendingAt`. If a pass is already running, the tap is a follow-up and Overview or the widget says so.
+
+Mobile-data warning (`ManualSyncStarter`) applies only to Overview and the widget. With Wi-Fi only on and the phone on cellular, those same entry points ask whether to sync now on mobile data; waiting for Wi-Fi still enqueues under the Wi-Fi rule. Scheduled sync and instant upload do not show either dialog. “Wi-Fi only” and “Only while charging” still withhold the transfer until they are met, and the screen says which one it is waiting for.
 
 Pause, resume, and cancel are notification actions delivered to the non-exported `SyncActionReceiver`, which flips `SyncControl`. Checkpoints sit between pairs, before the remote scan, between directory actions, and before each file attempt.
 
@@ -502,6 +537,8 @@ Add account (`WebDavConnectionRepository.addAccount`):
 6. Insert the Room row, save credentials, save the certificate.
 
 The password is cleared from `AddAccountViewModel` state after a successful save. Certificate bytes are read fully into memory in the ViewModel before save; parsing happens later inside the trust factory.
+
+The probe client and the authenticated client are closed after the save. `WebDavClientFactory.shutdown` drops the connection pool on OkHttp’s executor. Add account resumes on the main thread, and closing those sockets there throws `NetworkOnMainThreadException`.
 
 Delete account is a two-step dialog. The optional “also delete the files” path:
 
@@ -529,7 +566,7 @@ Pairs that fail the check are skipped and counted in the toast. Restore does not
 
 ## 11. Diagnostics
 
-`DiagnosticLogger` writes `files/diagnostics/diagnostic.log` when the setting is on. Lines are redacted (`DiagnosticRedactor`: `Authorization`, `password=`, Basic/Bearer tokens, URL userinfo passwords) and also mirrored to logcat. Each line is `fsync`’d. The file rotates by keeping the latter half after 2 MiB. Share uses `FileProvider` with `FLAG_GRANT_READ_URI_PERMISSION`. Logging must not crash the sync path; write failures are swallowed after a logcat warning.
+`DiagnosticLogger` writes `files/diagnostics/diagnostic.log` when the setting is on. Lines are redacted (`DiagnosticRedactor`: `Authorization`, `password=`, Basic/Bearer tokens, URL userinfo passwords, `push-subscriptions/<token>`, the `push-resource` / `auth-secret` / `subscription-public-key` XML values, and `Push-Dont-Notify` header values) and also mirrored to logcat. Push code logs only the origin of endpoint URLs, the first 6 characters of a topic, and never registration URLs or keys (`PushLogPrivacyTest`). Each line is `fsync`’d. The file rotates by keeping the latter half after 2 MiB. Share uses `FileProvider` with `FLAG_GRANT_READ_URI_PERMISSION`. Logging must not crash the sync path; write failures are swallowed after a logcat warning.
 
 The log includes pair names, remote paths, account base URLs, and relative file paths. It is meant for the user to send while debugging.
 
@@ -537,7 +574,7 @@ The log includes pair names, remote paths, account base URLs, and relative file 
 
 `sync_widget_info.xml` is a 4×1 home widget (`targetCellWidth=4`, `targetCellHeight=1`), resize horizontal, `updatePeriodMillis=0` (the system does not poll it). Updates are pushed from the worker and from `onUpdate` / the Sync button.
 
-The Sync button sends an explicit immutable broadcast `ACTION_SYNC_NOW` to `SyncWidgetProvider`. On cellular with the warning enabled, the widget starts `MainActivity` with `EXTRA_REQUEST_SYNC` so Overview can show the same confirm dialog. Otherwise it enqueues `manual_sync`.
+The Sync button sends an explicit immutable broadcast `ACTION_SYNC_NOW` to `SyncWidgetProvider`. On cellular with the warning enabled, or with Wi-Fi only on, the widget starts `MainActivity` with `EXTRA_REQUEST_SYNC` so Overview can show the same confirm dialog. Otherwise it calls `enqueueUserSync`.
 
 `requestUpdate(..., forceIdle = true)` from the worker `finally` block paints “not syncing” even if WorkManager still lists the worker as `RUNNING` for a moment. That avoids a sticky “Sync in process…” after an error.
 
@@ -553,6 +590,7 @@ These are properties of the current design, not a claim that every edge is safe.
 - Backup transport is told to skip the database, DataStore, credentials, and custom certs.
 - The sync notification receiver is not exported. Its `PendingIntent`s are explicit and immutable.
 - Release builds are minified (R8). Sardine, XmlPull, and okhttp-digest are kept because they reflect.
+- WebDAV-Push: a registration URL is `DELETE`d only when its scheme, host, and port equal the account base URL; otherwise no request is built. `Location` is validated (absolute `https`, ≤ 2048 printable ASCII, no `"` or `\`) before it is stored or sent in `Push-Dont-Notify`. Only messages the connector decrypted are used, and a topic is matched only against `ACTIVE` rows of the instance's own account. Push XML parsing is namespace-aware, rejects DOCTYPE, and is capped at 64 KiB (multistatus) / 4 KiB (message).
 
 ## 14. Build, test, and configuration
 
@@ -564,13 +602,37 @@ These are properties of the current design, not a claim that every edge is safe.
 
 `keystore.properties` and `*.keystore` / `*.jks` are gitignored. ProGuard rules keep the WebDAV stack; there are no app-class keep rules.
 
-Unit tests cover diff cases, conflict names, idle policy, scheduler constraints, folder-change decisions, overview metrics, path sanitizing, and Room DAO behavior. They run on the JVM with Robolectric where Android APIs are required.
+Unit tests cover diff cases, conflict names, idle policy, scheduler constraints, folder-change decisions, overview metrics, path sanitizing, Room DAO behavior, the 4 → 5 migration, and WebDAV-Push (XML, protocol client against MockWebServer with AngaraDAV-shaped fixtures, `Push-Dont-Notify`, planner, manager state machine, event routing, status text, log privacy). They run on the JVM with Robolectric where Android APIs are required.
 
 ## 15. Operational facts worth remembering
 
 - A file becomes “known” when a transfer or a `RememberInSync` result writes a baseline row (size, mtime, and ETag or content hash when the server or the clock does not make a later edit visible).
-- Two-way, to-device, and to-cloud can skip the network when the full local fingerprint is unchanged, mtimes are real, the last status is OK, and the last remote scan is under 24 hours old. A remote-only edit waits for that cap.
+- Two-way, to-device, and to-cloud can skip the network when the full local fingerprint is unchanged, mtimes are real, the last status is OK, and the last remote scan is under 24 hours old. A remote-only edit waits for that cap, or for a WebDAV-Push notification when push is on.
 - One-way sameness uses that baseline, not a raw local-mtime versus remote `Last-Modified` compare.
 - Overview status is ERROR if any enabled pair’s last status is ERROR. Otherwise it is the status of the pair with the newest `lastSyncAt`.
 - Renames are delete-plus-add. There is no move detection.
 - The app will not follow an HTTP redirect to a canonical WebDAV URL. The saved base URL has to be the URL that answers `PROPFIND` directly.
+- WebDAV-Push is best effort. A push is lost if the phone is offline longer than the server's message TTL (AngaraDAV 2.5.3 uses 1 hour), so the 24-hour remote-scan cap and periodic sync stay as the safety net.
+
+## 16. WebDAV-Push (instant download)
+
+Opt-in (`AppSettings.instantDownloadEnabled`). Implements the client side of draft-bitfire-webdav-push for file folders. The reference server is [AngaraDAV](https://github.com/offsyanka99/AngaraDAV) 2.5.3+, which supports WebDAV-Push for all of its services: calendars, address books, and file storage (`push_files_enabled`). Other servers that implement the draft for WebDAV collections also work; without push support the app keeps to scheduled sync.
+
+**Who is subscribed.** `PushRegistrationPlanner.desired` maps every enabled, non-to-cloud pair to `(accountId, sanitized remote root)`. Pairs that share a root share one registration. `PushCoordinator` (started at process start) watches pairs and settings and calls `PushRepository.applyDesired`: new keys start at `DISCOVER`; keys no longer wanted become `PENDING_DELETE` (or are dropped when nothing was registered). Any change enqueues `push_reconcile`.
+
+**Transport.** One UnifiedPush instance per account (`account-{id}`), behind the `PushDistributor` seam. Push services (`PushDistributor.options()`): the built-in **Google Play (FCM)** distributor, listed by the connector as this app's own package only when Google Play services is installed, plus every installed UnifiedPush app. Tapping the switch or “Change” in Settings → Synchronization opens one dialog with the on/off switch and a radio list. Google Play (FCM) is preselected unless another saved service is still installed; with no options at all the dialog explains what to install and Save can only turn push off. Save calls `UnifiedPush.saveDistributor` (which tells the previous distributor to drop this app's registrations), clears all endpoint rows so every account requests a fresh endpoint, stores the setting, and enqueues `push_reconcile`. The FCM path requires the server's VAPID key; without one the distributor reports `VAPID_REQUIRED` and the endpoint fails.
+
+**Registration upkeep** (`PushRegistrationManager`, serialized by a mutex; row writes use `updateIfUnchanged` so coordinator and callback changes win over stale network results):
+
+1. `PENDING_DELETE`: same-origin `DELETE` of the registration URL (404 is success). Transient failures keep the row until its expiry; anything else drops it.
+2. Discovery: Depth-0 PROPFIND of `transports`, `topic`, `supported-triggers`. Capable → `WAITING_FOR_ENDPOINT` (or stays `ACTIVE` when the topic is unchanged); no props → `UNSUPPORTED` (re-checked after 7 days); 404 → `WAITING_FOR_ROOT` (re-checked after 1 day or after the pair's next sync).
+3. Endpoint: request one from the distributor when missing, failed for 6 h, unanswered for 1 day, or made with another VAPID key. The `REQUESTED` row is written before `register()` so a fast callback is not overwritten.
+4. Register (`POST <push-register>`, `content-update` depth `infinity`, 7-day expiry): for `WAITING_FOR_ENDPOINT` rows, and for `ACTIVE` rows that are due (less than min(3 days, half the granted lifetime) left), were made with another endpoint URL (the old registration is deleted first), or predate the endpoint row. At most 10 new registrations per account per run. `429` stores `Retry-After` and stops the account; `invalid-subscription` fails the endpoint.
+
+It runs from `push_reconcile`, daily from `push_maintenance` (which also re-registers with the distributor and checks the VAPID key weekly), and at the end of each `SyncWorker` pass for accounts that already opened a connection (no extra wake; skipped when the lock is busy). Account deletion calls `unregisterAccount` first, while credentials still exist.
+
+**Messages.** `WebDavPushService` (Hilt service extending the connector's `PushService`) hands each callback to `PushEventHandler` on the app scope. A content update for a topic that matches an `ACTIVE` row of that account sets `remoteChangePendingAt` on the served pairs and calls `SyncScheduler.enqueuePushSync`: a follow-up during an active session, otherwise a delayed `push_sync`. A key-rotation message sends the account's rows back to discovery. `onUnregistered` moves `ACTIVE` rows to `WAITING_FOR_ENDPOINT`.
+
+**Echo suppression.** Before a pair's pass touches the server, `SyncEngine` sets `Push-Dont-Notify` on the account client to the registration URLs that serve only this pair (`suppressionUrlsFor`), so a shared root still wakes the other pair. An OkHttp application interceptor adds it to `PUT`, `MKCOL`, `DELETE`, `MOVE`, `COPY`, `PROPPATCH`, so a Digest retry keeps it. `sync()` clears it for every client of the session in `finally`.
+
+**UI.** Settings → Synchronization has the switch (opens the dialog above), the push service row (“Change”), and the help text in (i). Saving the dialog also clears every registration's backoff, so failed or unsupported folders are retried on the next run. Each Folders tile and the folder pair editor show a status line from `PushStatus` (green when active, red with the reason when failed; failures name the HTTP status or the failing check, never a URL).

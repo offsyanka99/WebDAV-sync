@@ -46,6 +46,7 @@ class SettingsDataStore @Inject constructor(
         val batteryOptimizationDisabled = booleanPreferencesKey("battery_optimization_disabled")
         val autoStartOnBoot = booleanPreferencesKey("auto_start_on_boot")
         val diagnosticLogEnabled = booleanPreferencesKey("diagnostic_log_enabled")
+        val instantDownloadEnabled = booleanPreferencesKey("instant_download_enabled")
     }
 
     private fun Preferences.toAppSettings(): AppSettings {
@@ -68,6 +69,7 @@ class SettingsDataStore @Inject constructor(
                 ?: defaults.batteryOptimizationDisabled,
             autoStartOnBoot = this[Keys.autoStartOnBoot] ?: defaults.autoStartOnBoot,
             diagnosticLogEnabled = this[Keys.diagnosticLogEnabled] ?: defaults.diagnosticLogEnabled,
+            instantDownloadEnabled = this[Keys.instantDownloadEnabled] ?: defaults.instantDownloadEnabled,
         ).clamped()
     }
 
@@ -95,5 +97,6 @@ class SettingsDataStore @Inject constructor(
         this[Keys.batteryOptimizationDisabled] = settings.batteryOptimizationDisabled
         this[Keys.autoStartOnBoot] = settings.autoStartOnBoot
         this[Keys.diagnosticLogEnabled] = settings.diagnosticLogEnabled
+        this[Keys.instantDownloadEnabled] = settings.instantDownloadEnabled
     }
 }

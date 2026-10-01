@@ -3,6 +3,7 @@ package org.vovchenko.webdavsync.sync.worker
 import android.app.job.JobScheduler
 import androidx.test.core.app.ApplicationProvider
 import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.testing.WorkManagerTestInitHelper
@@ -25,6 +26,8 @@ import org.vovchenko.webdavsync.data.local.settings.SettingsDataStore
 import org.vovchenko.webdavsync.data.repository.SettingsRepository
 import org.vovchenko.webdavsync.data.remote.InFlightCallRegistry
 import org.vovchenko.webdavsync.sync.control.SyncControl
+import org.vovchenko.webdavsync.sync.control.SyncWaitReason
+import org.vovchenko.webdavsync.sync.control.UserSyncResult
 
 /** Verifies WorkManager scheduling behavior driven by [AppSettings] (plan Phase 5/10). */
 @RunWith(RobolectricTestRunner::class)
@@ -82,6 +85,83 @@ class SyncSchedulerTest {
     }
 
     @Test
+    fun `user sync replaces a queued manual sync with the current constraints`() = runTest {
+        settingsRepository.update { it.copy(wifiOnly = true, onlyWhileCharging = true) }
+        scheduler.enqueueImmediateSync()
+        settingsRepository.update { it.copy(wifiOnly = false, onlyWhileCharging = false) }
+
+        val result = scheduler.enqueueUserSync(bypassUnmetered = false)
+
+        assertEquals(UserSyncResult.Started, result)
+        val enqueued = enqueued(SyncWorker.UNIQUE_MANUAL_WORK_NAME)
+        assertEquals(enqueued.toString(), 1, enqueued.size)
+        assertEquals(NetworkType.CONNECTED, enqueued.single().constraints.requiredNetworkType)
+        assertTrue(!enqueued.single().constraints.requiresCharging())
+    }
+
+    @Test
+    fun `user sync on mobile data drops the wifi requirement and keeps charging`() = runTest {
+        settingsRepository.update { it.copy(wifiOnly = true, onlyWhileCharging = true) }
+
+        val result = scheduler.enqueueUserSync(bypassUnmetered = true)
+
+        val waiting = result as UserSyncResult.Waiting
+        assertEquals(listOf(SyncWaitReason.CHARGING), waiting.reasons)
+        val enqueued = enqueued(SyncWorker.UNIQUE_MANUAL_WORK_NAME)
+        assertEquals(1, enqueued.size)
+        assertEquals(NetworkType.CONNECTED, enqueued.single().constraints.requiredNetworkType)
+        assertTrue(enqueued.single().constraints.requiresCharging())
+        settingsRepository.update { it.copy(wifiOnly = false, onlyWhileCharging = false) }
+    }
+
+    @Test
+    fun `user sync cancels a waiting push sync and leaves other push work`() = runTest {
+        settingsRepository.update { it.copy(wifiOnly = false, onlyWhileCharging = false) }
+        scheduler.enqueuePushSync(listOf(1L))
+        scheduler.enqueuePushReconcile()
+        scheduler.ensurePushMaintenance()
+
+        assertEquals(UserSyncResult.Started, scheduler.enqueueUserSync(bypassUnmetered = false))
+
+        assertTrue(
+            workManager.getWorkInfosForUniqueWork(SyncWorker.UNIQUE_PUSH_WORK_NAME).get()
+                .all { it.state == WorkInfo.State.CANCELLED },
+        )
+        assertEquals(
+            WorkInfo.State.ENQUEUED,
+            workManager.getWorkInfosForUniqueWork(SyncScheduler.PUSH_RECONCILE_WORK_NAME).get()
+                .single().state,
+        )
+        assertEquals(
+            WorkInfo.State.ENQUEUED,
+            workManager.getWorkInfosForUniqueWork(SyncScheduler.PUSH_MAINTENANCE_WORK_NAME).get()
+                .single().state,
+        )
+        assertEquals(1, enqueued(SyncWorker.UNIQUE_MANUAL_WORK_NAME).size)
+    }
+
+    @Test
+    fun `user sync during a running session is a follow-up`() = runTest {
+        settingsRepository.update { it.copy(wifiOnly = false, onlyWhileCharging = false) }
+        syncControl.beginSession()
+
+        assertEquals(UserSyncResult.AlreadyRunning, scheduler.enqueueUserSync(bypassUnmetered = false))
+
+        assertTrue(enqueued(SyncWorker.UNIQUE_MANUAL_WORK_NAME).isEmpty())
+        val followUp = syncControl.endSession()
+        assertTrue(followUp.allPairs)
+    }
+
+    @Test
+    fun `second automatic sync stays behind the user sync`() = runTest {
+        settingsRepository.update { it.copy(wifiOnly = false, onlyWhileCharging = false) }
+        scheduler.enqueueUserSync(bypassUnmetered = false)
+        scheduler.enqueueImmediateSync(folderPairId = 3L)
+
+        assertEquals(1, enqueued(SyncWorker.UNIQUE_MANUAL_WORK_NAME).size)
+    }
+
+    @Test
     fun `second immediate sync while session active is coalesced not replaced`() = runTest {
         syncControl.beginSession()
         scheduler.enqueueImmediateSync(folderPairId = 1L)
@@ -114,6 +194,9 @@ class SyncSchedulerTest {
         assertEquals(after.toString(), 1, after.size)
         assertEquals(after.toString(), WorkInfo.State.CANCELLED, after.first().state)
     }
+
+    private fun enqueued(name: String): List<WorkInfo> =
+        workManager.getWorkInfosForUniqueWork(name).get().filter { it.state == WorkInfo.State.ENQUEUED }
 
     private fun awaitWork(name: String, want: WorkInfo.State): List<WorkInfo> {
         var last = emptyList<WorkInfo>()
@@ -171,5 +254,57 @@ class SyncSchedulerTest {
             requireBatteryNotLow = false,
         )
         assertTrue(!override.requiresBatteryNotLow())
+    }
+
+    @Test
+    fun `push sync is one delayed KEEP job with the sync constraints`() = runTest {
+        settingsRepository.update { it.copy(wifiOnly = true, onlyWhileCharging = true, syncEvenWhenBatteryLow = false) }
+        scheduler.enqueuePushSync(listOf(1L))
+        scheduler.enqueuePushSync(listOf(2L))
+
+        val infos = workManager.getWorkInfosForUniqueWork(SyncWorker.UNIQUE_PUSH_WORK_NAME).get()
+        assertEquals(1, infos.size)
+        val info = infos.single()
+        assertEquals(WorkInfo.State.ENQUEUED, info.state)
+        assertTrue(info.initialDelayMillis >= SyncScheduler.PUSH_SYNC_DELAY_SECONDS * 1000)
+        assertEquals(NetworkType.UNMETERED, info.constraints.requiredNetworkType)
+        assertTrue(info.constraints.requiresCharging())
+        assertTrue(info.constraints.requiresBatteryNotLow())
+        settingsRepository.update { it.copy(wifiOnly = false, onlyWhileCharging = false) }
+    }
+
+    @Test
+    fun `push during a session is a follow-up, not a second worker`() = runTest {
+        syncControl.beginSession()
+        scheduler.enqueuePushSync(listOf(5L, 6L))
+
+        assertTrue(workManager.getWorkInfosForUniqueWork(SyncWorker.UNIQUE_PUSH_WORK_NAME).get().isEmpty())
+        assertEquals(setOf(5L, 6L), syncControl.endSession().pairIds)
+    }
+
+    @Test
+    fun `push reconcile is coalesced while queued`() = runTest {
+        settingsRepository.update { it.copy(wifiOnly = false, onlyWhileCharging = true) }
+        scheduler.enqueuePushReconcile()
+        scheduler.enqueuePushReconcile()
+        val infos = workManager.getWorkInfosForUniqueWork(SyncScheduler.PUSH_RECONCILE_WORK_NAME).get()
+        assertEquals(1, infos.size)
+        assertEquals(NetworkType.CONNECTED, infos.single().constraints.requiredNetworkType)
+        assertTrue(!infos.single().constraints.requiresCharging())
+        settingsRepository.update { it.copy(onlyWhileCharging = false) }
+    }
+
+    @Test
+    fun `push maintenance is enqueued and cancelled`() = runTest {
+        scheduler.ensurePushMaintenance()
+        assertEquals(
+            WorkInfo.State.ENQUEUED,
+            workManager.getWorkInfosForUniqueWork(SyncScheduler.PUSH_MAINTENANCE_WORK_NAME).get().single().state,
+        )
+        scheduler.cancelPushMaintenance()
+        assertTrue(
+            workManager.getWorkInfosForUniqueWork(SyncScheduler.PUSH_MAINTENANCE_WORK_NAME).get()
+                .all { it.state == WorkInfo.State.CANCELLED },
+        )
     }
 }

@@ -7,6 +7,10 @@
         <exclude domain="database" path="webdav_sync.db-wal" />
         <exclude domain="database" path="webdav_sync.db-shm" />
         <exclude domain="file" path="datastore" />
+        <exclude domain="database" path="unifiedpush-connector" />
+        <exclude domain="database" path="unifiedpush-connector-journal" />
+        <exclude domain="sharedpref" path="unifiedpush.connector.xml" />
+        <exclude domain="sharedpref" path="UP-embedded_fcm.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="webdav_credentials.xml" />
@@ -15,5 +19,9 @@
         <exclude domain="database" path="webdav_sync.db-wal" />
         <exclude domain="database" path="webdav_sync.db-shm" />
         <exclude domain="file" path="datastore" />
+        <exclude domain="database" path="unifiedpush-connector" />
+        <exclude domain="database" path="unifiedpush-connector-journal" />
+        <exclude domain="sharedpref" path="unifiedpush.connector.xml" />
+        <exclude domain="sharedpref" path="UP-embedded_fcm.xml" />
     </device-transfer>
 </data-extraction-rules>

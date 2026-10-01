@@ -7,24 +7,36 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import org.vovchenko.webdavsync.data.local.settings.AppSettings
+import org.vovchenko.webdavsync.push.PushServiceOption
 import org.vovchenko.webdavsync.ui.components.AppScaffold
 import org.vovchenko.webdavsync.ui.components.LabelWithInfoIcon
 import org.vovchenko.webdavsync.ui.components.SettingHelpStyle
@@ -39,6 +51,21 @@ fun SynchronizationSettingsScreen(
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val settings by viewModel.settings.collectAsState()
+    val pushServiceLabel by viewModel.pushServiceLabel.collectAsState()
+    var pushDialog by remember { mutableStateOf<PushDialogState?>(null) }
+
+    LaunchedEffect(Unit) { viewModel.refreshPushService() }
+
+    pushDialog?.let { state ->
+        WebDavPushDialog(
+            state = state,
+            onSave = { enabled, service ->
+                pushDialog = null
+                viewModel.applyPushSettings(enabled, service)
+            },
+            onDismiss = { pushDialog = null },
+        )
+    }
 
     AppScaffold(
         title = "Synchronization",
@@ -102,6 +129,9 @@ fun SynchronizationSettingsScreen(
                     step = 15,
                     onValueChange = { viewModel.update { s -> s.copy(autoSyncIntervalMinutes = it) } },
                 )
+                if (settings.instantDownloadEnabled) {
+                    HelpText(INTERVAL_WITH_PUSH_INFO)
+                }
                 SettingToggleRow(
                     label = "Sync immediately on local changes",
                     checked = settings.syncImmediatelyOnLocalChange,
@@ -135,6 +165,41 @@ fun SynchronizationSettingsScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            HorizontalDivider()
+
+            Text("Server changes", style = MaterialTheme.typography.titleSmall)
+            SettingToggleRow(
+                label = "Download server changes instantly (WebDAV-Push)",
+                checked = settings.instantDownloadEnabled,
+                onCheckedChange = { on ->
+                    // The switch opens the dialog; nothing is saved until the user confirms there.
+                    pushDialog = PushDialogState(viewModel.pushServiceChoice(), initialEnabled = on)
+                },
+                help = INSTANT_DOWNLOAD_INFO,
+                helpStyle = SettingHelpStyle.InlineInfo,
+            )
+            HelpText(INSTANT_DOWNLOAD_SUMMARY)
+            if (settings.instantDownloadEnabled) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Push service: ${pushServiceLabel ?: "app missing"}",
+                        color = if (pushServiceLabel == null) MaterialTheme.colorScheme.error else Color.Unspecified,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(
+                        onClick = {
+                            pushDialog = PushDialogState(viewModel.pushServiceChoice(), initialEnabled = true)
+                        },
+                    ) {
+                        Text("Change")
+                    }
+                }
+            }
 
             HorizontalDivider()
 
@@ -229,3 +294,116 @@ private const val BATTERY_LOW_INFO =
 private const val BATTERY_SAVER_INFO =
     "Sets Wi‑Fi only, only while charging, 3-hour interval, and turns off sync-on-local-change. " +
         "A folder pair’s Instant upload checkbox still watches that folder."
+
+private data class PushDialogState(val choice: PushServiceChoice, val initialEnabled: Boolean)
+
+@Composable
+private fun WebDavPushDialog(
+    state: PushDialogState,
+    onSave: (Boolean, PushServiceOption?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val options = state.choice.options
+    var enabled by remember { mutableStateOf(state.initialEnabled && options.isNotEmpty()) }
+    var selected by remember { mutableStateOf(state.choice.preselected) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("WebDAV-Push") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Download server changes instantly", modifier = Modifier.weight(1f).padding(end = 8.dp))
+                    Switch(checked = enabled, onCheckedChange = { enabled = it }, enabled = options.isNotEmpty())
+                }
+                HorizontalDivider()
+                Text("Push service", style = MaterialTheme.typography.titleSmall)
+                if (options.isEmpty()) {
+                    Text(NO_PUSH_SERVICE_INFO, color = MaterialTheme.colorScheme.error)
+                }
+                options.forEach { option ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .selectable(
+                                selected = option == selected,
+                                enabled = enabled,
+                                role = Role.RadioButton,
+                                onClick = { selected = option },
+                            ),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = option == selected, onClick = null, enabled = enabled)
+                        Column(modifier = Modifier.padding(start = 8.dp)) {
+                            Text(option.label)
+                            Text(
+                                text = if (option.isGooglePlay) "System default · built in" else "UnifiedPush app · no Google",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                if (options.none { !it.isGooglePlay }) {
+                    HelpText(NO_UNIFIEDPUSH_APP_INFO)
+                }
+                if (enabled && selected?.isGooglePlay == true) {
+                    HelpText(GOOGLE_PLAY_PRIVACY_INFO)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(enabled, selected) },
+                enabled = !enabled || selected != null,
+            ) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun HelpText(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+private const val INSTANT_DOWNLOAD_SUMMARY =
+    "Starts a sync when files change on the server. Needs a server with WebDAV-Push for files " +
+        "(AngaraDAV 2.5.3+). Regular auto-sync keeps running as a safety net."
+
+private const val INSTANT_DOWNLOAD_INFO =
+    "The server notifies this device when files change in a synced folder, and that folder pair syncs " +
+        "about 10 seconds later. To cloud pairs are not subscribed.\n\n" +
+        "Push service:\n" +
+        "• Google Play (FCM) — built in, the system default. Needs Google Play services. " +
+        "Notifications travel through Google.\n" +
+        "• A UnifiedPush app such as ntfy — no Google. Install it from F-Droid or Google Play; it then " +
+        "appears in the list.\n\n" +
+        "Either way, notifications are end-to-end encrypted: the push service sees when they arrive and an " +
+        "opaque folder ID, never file names or contents. Push-triggered syncs follow Wi‑Fi only, charging, " +
+        "and battery settings. The server must have WebDAV-Push for files turned on, and must accept the push " +
+        "service's address (AngaraDAV: fcm.googleapis.com or your ntfy host in push_allowed_hosts, if that list is set)."
+
+private const val INTERVAL_WITH_PUSH_INFO =
+    "Server changes arrive by push. This interval still controls how often local changes are uploaded " +
+        "unless Instant upload is on."
+
+private const val NO_PUSH_SERVICE_INFO =
+    "No push service is available. Install a UnifiedPush app such as ntfy, or use a phone with Google Play services."
+
+private const val NO_UNIFIEDPUSH_APP_INFO =
+    "To avoid Google, install a UnifiedPush app such as ntfy; it will appear here."
+
+private const val GOOGLE_PLAY_PRIVACY_INFO =
+    "Notifications go through Google's FCM. Google sees when they arrive, never file names or contents."

@@ -12,12 +12,17 @@ import kotlinx.coroutines.launch
 import org.vovchenko.webdavsync.data.local.FolderPairEntity
 import org.vovchenko.webdavsync.data.local.saf.SafFolderAccess
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
+import org.vovchenko.webdavsync.data.repository.PushRepository
+import org.vovchenko.webdavsync.data.repository.SettingsRepository
 import org.vovchenko.webdavsync.data.repository.WebDavAccountRepository
+import org.vovchenko.webdavsync.push.PushStatus
 import javax.inject.Inject
 
 data class FolderPairRow(
     val folderPair: FolderPairEntity,
     val accountName: String,
+    /** WebDAV-Push subscription status; null while the feature is off. */
+    val push: PushStatus.Line? = null,
 )
 
 @HiltViewModel
@@ -25,14 +30,25 @@ class FoldersViewModel @Inject constructor(
     private val folderPairRepository: FolderPairRepository,
     private val safFolderAccess: SafFolderAccess,
     accountRepository: WebDavAccountRepository,
+    settingsRepository: SettingsRepository,
+    pushRepository: PushRepository,
 ) : ViewModel() {
 
     val rows: StateFlow<List<FolderPairRow>> = combine(
         folderPairRepository.observeAll(),
         accountRepository.observeAll(),
-    ) { pairs, accounts ->
+        settingsRepository.settings,
+        pushRepository.observeRegistrations(),
+        pushRepository.observeEndpoints(),
+    ) { pairs, accounts, settings, registrations, endpoints ->
         val namesById = accounts.associate { it.id to it.displayName }
-        pairs.map { pair -> FolderPairRow(pair, namesById[pair.accountId] ?: "Unknown account") }
+        pairs.map { pair ->
+            FolderPairRow(
+                folderPair = pair,
+                accountName = namesById[pair.accountId] ?: "Unknown account",
+                push = PushStatus.lineFor(pair, settings, registrations, endpoints),
+            )
+        }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     fun setEnabled(folderPair: FolderPairEntity, enabled: Boolean) {
