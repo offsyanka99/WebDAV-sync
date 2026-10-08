@@ -1,7 +1,7 @@
 # WebDAV-sync architecture
 
 **App:** `org.vovchenko.webdavsync`  
-**Version documented:** 1.2.1 (`versionCode` 18)  
+**Version documented:** 1.2.2 (`versionCode` 19)  
 **Platform:** Android 8.0+ (minSdk 26, compileSdk 37, targetSdk 35)  
 **Date:** 2026-10-01
 
