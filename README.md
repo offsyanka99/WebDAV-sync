@@ -129,6 +129,13 @@ Core flow: scan local + remote → diff against last-sync baseline → transfer/
 
 ## Changelog (recent)
 
+Library and tool updates that are not a release yet are in [CHANGELOG.md](CHANGELOG.md).
+
+### Unreleased
+
+- Gradle 9.8.1, Material 1.14, DataStore Preferences 1.2.1, DocumentFile 1.1, WorkManager 2.12, Robolectric 4.17.
+- Still on OkHttp 4.12, encrypted passwords via `security-crypto` 1.1.0-alpha06, and target Android 15 (API 35).
+
 ### v1.2.1
 
 - **Instant download with WebDAV-Push (optional, off by default).** When a file changes on the server — from another device, the web portal, or any WebDAV client — the server notifies the phone and the matching folder pair syncs about 10 seconds later. Turn it on in **Settings → Synchronization** and pick the push service: built-in **Google Play (FCM)** (default) or a UnifiedPush app such as ntfy. Needs a server with WebDAV-Push for files ([AngaraDAV](https://github.com/offsyanka99/AngaraDAV) 2.5.3+).

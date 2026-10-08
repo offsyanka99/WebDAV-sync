@@ -56,7 +56,7 @@ flowchart LR
 | Settings | DataStore Preferences (`settings`) |
 | Secrets | `androidx.security:security-crypto` EncryptedSharedPreferences, AES-256 (Tink resolved to `tink-android` 1.23.0) |
 | Push | UnifiedPush connector 3.3.5 (Web Push RFC 8030/8291/8292) plus `embedded-fcm-distributor` 3.1.0 (FOSS, no Firebase SDK; talks to Google Play services over IPC, endpoints on `fcm.googleapis.com`, VAPID required). The connector's `tink` dependency is substituted with `tink-android` in `app/build.gradle.kts` |
-| Background work | WorkManager 2.11, foreground service type `dataSync` |
+| Background work | WorkManager 2.12, foreground service type `dataSync` |
 | HTTP / WebDAV | OkHttp 4.12, sardine-android 0.9, okhttp-digest 3.1 |
 | Local files | SAF `DocumentFile` only. No `MANAGE_EXTERNAL_STORAGE` |
 | Release build | R8 minify + optimize, optional signing via gitignored `keystore.properties` |
