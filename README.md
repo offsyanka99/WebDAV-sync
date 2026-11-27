@@ -37,7 +37,7 @@ A pass shows a foreground notification with pause, resume, and cancel only while
 
 Any WebDAV server that supports the methods this app uses (list, download, upload, delete, and create folder) can be a target. Authentication is Basic or Digest, detected from the server. HTTPS is required. You can import a private CA for a server with its own certificate.
 
-[AngaraDAV](https://github.com/offsyanka99/AngaraDAV) 2.5.3 and newer can push file-storage changes. Turn that on in the server under **System settings → Enable WebDAV-Push for file storage**. Docker image: `ghcr.io/offsyanka99/angaradav`.
+[NexusDAV](https://github.com/offsyanka99/NexusDAV) can push file-storage changes. Turn that on in the server under **System settings → Enable WebDAV-Push for file storage**. Docker image: `ghcr.io/offsyanka99/nexusdav`.
 
 On the phone, pick the push service under **Settings → Synchronization**:
 
