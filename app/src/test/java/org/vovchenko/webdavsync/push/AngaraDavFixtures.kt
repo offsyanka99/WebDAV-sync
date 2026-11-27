@@ -1,6 +1,6 @@
 package org.vovchenko.webdavsync.push
 
-import okhttp3.mockwebserver.MockResponse
+import mockwebserver3.MockResponse
 import org.vovchenko.webdavsync.data.remote.push.PushHeaders
 
 /** Response bodies shaped like AngaraDAV 2.5.3 (Sabre/DAV serializer, `x1` push prefix). */
@@ -47,18 +47,24 @@ object AngaraDavFixtures {
 <push-message xmlns="https://bitfire.at/webdav-push" xmlns:D="DAV:"><topic>$topic</topic><content-update/></push-message>"""
         .toByteArray()
 
-    fun discovered(topic: String = "topic-1") = MockResponse().setResponseCode(207)
-        .setHeader("Content-Type", "application/xml; charset=utf-8")
-        .setBody(multistatus(topic))
+    fun discovered(topic: String = "topic-1") = MockResponse.Builder()
+            .code(207)
+            .setHeader("Content-Type", "application/xml; charset=utf-8")
+            .body(multistatus(topic))
+            .build()
 
     fun registered(location: String = registrationUrl(), lifetimeMillis: Long = 7L * 24 * 60 * 60 * 1000) =
-        MockResponse().setResponseCode(204)
+        MockResponse.Builder()
+            .code(204)
             .setHeader("Location", location)
             .setHeader("Expires", PushHeaders.formatHttpDate(System.currentTimeMillis() + lifetimeMillis))
+            .build()
 
-    fun rejected(condition: String) = MockResponse().setResponseCode(403)
-        .setHeader("Content-Type", "application/xml; charset=utf-8")
-        .setBody(precondition(condition))
+    fun rejected(condition: String) = MockResponse.Builder()
+            .code(403)
+            .setHeader("Content-Type", "application/xml; charset=utf-8")
+            .body(precondition(condition))
+            .build()
 
-    fun rateLimited() = MockResponse().setResponseCode(429).setHeader("Retry-After", "3600")
+    fun rateLimited() = MockResponse.Builder().code(429).setHeader("Retry-After", "3600").build()
 }

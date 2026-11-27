@@ -36,6 +36,12 @@ class SyncNotificationHelper @Inject constructor(
         }
     }
 
+    /**
+     * Channel is created in [init], before this notification is handed to
+     * [androidx.work.ListenableWorker.setForeground]. POST_NOTIFICATIONS is not
+     * checked here: a denial hides the notice, and the dataSync foreground service
+     * still has to start or the pass is killed.
+     */
     fun foregroundInfo(progressText: String, isPaused: Boolean = false): ForegroundInfo {
         val notification = buildNotification(progressText, isPaused = isPaused, showActions = true)
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

@@ -5,6 +5,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -57,6 +58,24 @@ private data class FormEvents(val saved: Boolean = false, val deleted: Boolean =
 /** Default remote folder path for new folder pairs (user can change before save). */
 const val DEFAULT_REMOTE_FOLDER_PATH = "/Webdavsync"
 
+internal fun folderEditsAreUnsaved(
+    baseline: AddEditFolderPairFormState?,
+    current: AddEditFolderPairFormState,
+): Boolean = baseline != null && current != baseline
+
+private fun FolderPairEntity.toEditorForm(): AddEditFolderPairFormState = AddEditFolderPairFormState(
+    name = name,
+    accountId = accountId,
+    remoteFolderPath = remoteFolderPath,
+    localFolderUri = localFolderUri,
+    syncMethod = syncMethod,
+    excludeHiddenFiles = excludeHiddenFiles,
+    excludedSubfolders = excludedSubfolders,
+    deleteEmptyFolders = deleteEmptyFolders,
+    instantUpload = instantUpload,
+    enabled = enabled,
+)
+
 @HiltViewModel
 class AddEditFolderPairViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
@@ -85,6 +104,19 @@ class AddEditFolderPairViewModel @Inject constructor(
         ).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     private val form = MutableStateFlow(AddEditFolderPairFormState())
+
+    /**
+     * Null until an existing pair has loaded. The default form must not count as an edit
+     * during that load, or opening a folder and leaving at once would ask to save.
+     */
+    private val loadedBaseline = MutableStateFlow<AddEditFolderPairFormState?>(
+        if (folderPairId == null) form.value else null,
+    )
+
+    val hasUnsavedChanges: StateFlow<Boolean> = combine(form, loadedBaseline) { current, baseline ->
+        folderEditsAreUnsaved(baseline, current)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
     private val events = MutableStateFlow(FormEvents())
 
     val uiState: StateFlow<AddEditFolderPairUiState> = combine(
@@ -106,19 +138,16 @@ class AddEditFolderPairViewModel @Inject constructor(
         val id = folderPairId
         if (id != null) {
             viewModelScope.launch {
-                folderPairRepository.observeById(id).first()?.let { pair ->
-                    form.value = AddEditFolderPairFormState(
-                        name = pair.name,
-                        accountId = pair.accountId,
-                        remoteFolderPath = pair.remoteFolderPath,
-                        localFolderUri = pair.localFolderUri,
-                        syncMethod = pair.syncMethod,
-                        excludeHiddenFiles = pair.excludeHiddenFiles,
-                        excludedSubfolders = pair.excludedSubfolders,
-                        deleteEmptyFolders = pair.deleteEmptyFolders,
-                        instantUpload = pair.instantUpload,
-                        enabled = pair.enabled,
-                    )
+                val pair = folderPairRepository.observeById(id).first()
+                if (pair != null) {
+                    val loaded = pair.toEditorForm()
+                    // Keep keystrokes that landed before the row arrived.
+                    if (form.value == AddEditFolderPairFormState()) {
+                        form.value = loaded
+                    }
+                    loadedBaseline.value = loaded
+                } else {
+                    loadedBaseline.value = loadedBaseline.value ?: AddEditFolderPairFormState()
                 }
             }
         }
@@ -147,33 +176,44 @@ class AddEditFolderPairViewModel @Inject constructor(
         form.value = form.value.copy(excludedSubfolders = form.value.excludedSubfolders.filterIndexed { i, _ -> i != index })
     }
 
-    fun save() {
+    /** @return false when the form was rejected before a write started. */
+    fun save(): Boolean {
         val state = form.value
-        if (!state.canSave) return
+        if (!state.canSave) return false
         val remoteFolderPath = try {
             WebDavPathSafety.sanitize(state.remoteFolderPath.trim())
         } catch (error: IllegalArgumentException) {
             events.value = events.value.copy(error = error.message ?: "Remote path is not safe")
-            return
+            return false
         }
         viewModelScope.launch {
-            val entity = FolderPairEntity(
-                id = folderPairId ?: 0,
-                accountId = state.accountId!!,
-                name = state.name.trim(),
-                remoteFolderPath = remoteFolderPath,
-                localFolderUri = state.localFolderUri!!,
-                syncMethod = state.syncMethod,
-                excludeHiddenFiles = state.excludeHiddenFiles,
-                excludedSubfolders = state.excludedSubfolders,
-                deleteEmptyFolders = state.deleteEmptyFolders,
-                instantUpload = state.instantUpload,
-                enabled = state.enabled,
-            )
-            val existing = folderPairId?.let { folderPairRepository.observeById(it).first() }
-            folderPairEditor.save(existing, entity)
-            events.value = events.value.copy(saved = true, error = null)
+            try {
+                val entity = FolderPairEntity(
+                    id = folderPairId ?: 0,
+                    accountId = state.accountId!!,
+                    name = state.name.trim(),
+                    remoteFolderPath = remoteFolderPath,
+                    localFolderUri = state.localFolderUri!!,
+                    syncMethod = state.syncMethod,
+                    excludeHiddenFiles = state.excludeHiddenFiles,
+                    excludedSubfolders = state.excludedSubfolders,
+                    deleteEmptyFolders = state.deleteEmptyFolders,
+                    instantUpload = state.instantUpload,
+                    enabled = state.enabled,
+                )
+                val existing = folderPairId?.let { folderPairRepository.observeById(it).first() }
+                folderPairEditor.save(existing, entity)
+                val savedForm = state.copy(name = state.name.trim(), remoteFolderPath = remoteFolderPath)
+                form.value = savedForm
+                loadedBaseline.value = savedForm
+                events.value = events.value.copy(saved = true, error = null)
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (error: Exception) {
+                events.value = events.value.copy(error = error.message ?: "Could not save the folder pair")
+            }
         }
+        return true
     }
 
     fun delete() {

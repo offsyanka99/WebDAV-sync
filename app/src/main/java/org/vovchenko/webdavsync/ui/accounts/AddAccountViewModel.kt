@@ -28,6 +28,13 @@ data class AddAccountUiState(
     val saved: Boolean = false,
 ) {
     val canSave: Boolean get() = displayName.isNotBlank() && baseUrl.isNotBlank() && username.isNotBlank() && password.isNotBlank()
+
+    val hasUnsavedInput: Boolean
+        get() = displayName.isNotBlank() ||
+            baseUrl.isNotBlank() ||
+            username.isNotBlank() ||
+            password.isNotBlank() ||
+            trustedCertificateBytes != null
 }
 
 @HiltViewModel

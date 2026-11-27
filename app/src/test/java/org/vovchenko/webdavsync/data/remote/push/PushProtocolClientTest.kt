@@ -1,9 +1,8 @@
 package org.vovchenko.webdavsync.data.remote.push
 
 import kotlinx.coroutines.test.runTest
-import okhttp3.OkHttpClient
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -13,16 +12,19 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-import org.vovchenko.webdavsync.data.remote.SardineWebDavClient
+import org.vovchenko.webdavsync.data.local.security.WebDavCredentials
+import org.vovchenko.webdavsync.data.model.AuthScheme
+import org.vovchenko.webdavsync.data.remote.Dav4jvmWebDavClient
 import org.vovchenko.webdavsync.data.remote.WebDavException
-import java.io.File
+import org.vovchenko.webdavsync.data.remote.ktor.buildAccountHttpClient
+import org.vovchenko.webdavsync.data.remote.trust.TrustedCertTrustManagerFactory
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
 class PushProtocolClientTest {
 
     private lateinit var server: MockWebServer
-    private lateinit var client: SardineWebDavClient
+    private lateinit var client: Dav4jvmWebDavClient
 
     private val registrationUrl = "https://dav.example.com/dav.php/push-subscriptions/" + "T".repeat(43)
 
@@ -30,42 +32,53 @@ class PushProtocolClientTest {
     fun setUp() {
         server = MockWebServer()
         server.start()
-        val http = OkHttpClient.Builder().followRedirects(false).build()
-        client = SardineWebDavClient(http, http, server.url("/dav.php/").toString(), File("build/tmp"))
+        val push = PushDontNotify()
+        val account = buildAccountHttpClient(
+            TrustedCertTrustManagerFactory.build(null).trustManager,
+            null,
+            null,
+            push,
+            null,
+        )
+        client = Dav4jvmWebDavClient(server.url("/dav.php/").toString(), push, account)
     }
 
     @After
     fun tearDown() {
-        server.shutdown()
+        client.close()
+        server.close()
     }
 
     @Test
     fun `discover sends Depth 0 PROPFIND to the collection and parses 207`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(207).setBody(MULTISTATUS))
+        server.enqueue(MockResponse.Builder().code(207).body(MULTISTATUS).build())
         val capability = client.discoverPush("Sync/My Files").getOrThrow()
         assertEquals("topic-22-chars-abcdefg", capability?.topic)
         assertEquals(PushDepth.INFINITY, capability?.contentDepth)
         val request = server.takeRequest()
         assertEquals("PROPFIND", request.method)
-        assertEquals("/dav.php/Sync/My%20Files/", request.path)
-        assertEquals("0", request.getHeader("Depth"))
-        assertTrue(request.body.readUtf8().contains("supported-triggers"))
+        assertEquals("/dav.php/Sync/My%20Files/", request.target)
+        assertEquals("0", request.headers["Depth"])
+        assertTrue(request.body!!.utf8().contains("supported-triggers"))
     }
 
     @Test
     fun `discover 404 fails with NotFound and 403 with auth failure`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(404))
+        server.enqueue(MockResponse.Builder().code(404).build())
         assertTrue(client.discoverPush("Gone").exceptionOrNull() is WebDavException.NotFound)
-        server.enqueue(MockResponse().setResponseCode(403))
+        server.enqueue(MockResponse.Builder().code(403).build())
         assertTrue(client.discoverPush("Forbidden").exceptionOrNull() is WebDavException.AuthenticationFailed)
     }
 
     @Test
     fun `discover without push properties succeeds with null`() = runTest {
         server.enqueue(
-            MockResponse().setResponseCode(207).setBody(
+            MockResponse.Builder()
+            .code(207)
+            .body(
                 """<d:multistatus xmlns:d="DAV:"><d:response><d:href>/x/</d:href></d:response></d:multistatus>""",
-            ),
+            )
+            .build(),
         )
         assertNull(client.discoverPush("Sync").getOrThrow())
     }
@@ -73,22 +86,24 @@ class PushProtocolClientTest {
     @Test
     fun `register 204 returns Location and Expires`() = runTest {
         server.enqueue(
-            MockResponse().setResponseCode(204)
-                .setHeader("Location", registrationUrl)
-                .setHeader("Expires", "Fri, 01 Jan 2100 00:00:00 GMT"),
+            MockResponse.Builder()
+            .code(204)
+            .setHeader("Location", registrationUrl)
+            .setHeader("Expires", "Fri, 01 Jan 2100 00:00:00 GMT")
+            .build(),
         )
         val result = client.registerPush("Sync", subscription()).getOrThrow()
         assertEquals(PushRegistrationResult.Registered(registrationUrl, 4_102_444_800_000L), result)
         val request = server.takeRequest()
         assertEquals("POST", request.method)
-        assertEquals("/dav.php/Sync/", request.path)
-        assertTrue(request.getHeader("Content-Type")!!.startsWith("application/xml"))
-        assertTrue(request.body.readUtf8().contains("<P:push-register"))
+        assertEquals("/dav.php/Sync/", request.target)
+        assertTrue(request.headers["Content-Type"]!!.startsWith("application/xml"))
+        assertTrue(request.body!!.utf8().contains("<P:push-register"))
     }
 
     @Test
     fun `register 201 without Expires falls back to one day`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(201).setHeader("Location", registrationUrl))
+        server.enqueue(MockResponse.Builder().code(201).setHeader("Location", registrationUrl).build())
         val before = System.currentTimeMillis()
         val result = client.registerPush("Sync", subscription()).getOrThrow() as PushRegistrationResult.Registered
         val day = 24L * 60 * 60 * 1000
@@ -97,9 +112,9 @@ class PushProtocolClientTest {
 
     @Test
     fun `register with an unusable Location fails`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(204).setHeader("Location", "http://dav.example.com/x"))
+        server.enqueue(MockResponse.Builder().code(204).setHeader("Location", "http://dav.example.com/x").build())
         assertTrue(client.registerPush("Sync", subscription()).getOrThrow() is PushRegistrationResult.Failed)
-        server.enqueue(MockResponse().setResponseCode(204))
+        server.enqueue(MockResponse.Builder().code(204).build())
         assertTrue(client.registerPush("Sync", subscription()).getOrThrow() is PushRegistrationResult.Failed)
     }
 
@@ -113,28 +128,73 @@ class PushProtocolClientTest {
         assertEquals(PushRegistrationResult.Unsupported("no-supported-trigger"), client.registerPush("Sync", subscription()).getOrThrow())
         server.enqueue(precondition("invalid-subscription"))
         assertEquals(PushRegistrationResult.InvalidSubscription, client.registerPush("Sync", subscription()).getOrThrow())
-        server.enqueue(MockResponse().setResponseCode(403))
+        server.enqueue(MockResponse.Builder().code(403).build())
         assertEquals(PushRegistrationResult.Failed(403, "Forbidden"), client.registerPush("Sync", subscription()).getOrThrow())
     }
 
     @Test
     fun `register 429 honours Retry-After`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(429).setHeader("Retry-After", "120"))
+        server.enqueue(MockResponse.Builder().code(429).setHeader("Retry-After", "120").build())
         assertEquals(PushRegistrationResult.RateLimited(120), client.registerPush("Sync", subscription()).getOrThrow())
-        server.enqueue(MockResponse().setResponseCode(429))
+        server.enqueue(MockResponse.Builder().code(429).build())
         assertEquals(PushRegistrationResult.RateLimited(3600), client.registerPush("Sync", subscription()).getOrThrow())
     }
 
     @Test
     fun `unregister treats 204 and 404 as success`() = runTest {
         val sameOriginUrl = server.url("/dav.php/push-subscriptions/" + "T".repeat(43)).toString()
-        server.enqueue(MockResponse().setResponseCode(204))
+        server.enqueue(MockResponse.Builder().code(204).build())
         assertTrue(client.unregisterPush(sameOriginUrl).isSuccess)
-        server.enqueue(MockResponse().setResponseCode(404))
+        server.enqueue(MockResponse.Builder().code(404).build())
         assertTrue(client.unregisterPush(sameOriginUrl).isSuccess)
         assertEquals("DELETE", server.takeRequest().method)
-        server.enqueue(MockResponse().setResponseCode(500))
+        server.enqueue(MockResponse.Builder().code(500).build())
         assertTrue(client.unregisterPush(sameOriginUrl).isFailure)
+    }
+
+    @Test
+    fun `discover omits Push-Dont-Notify and a Digest unregister retry keeps it`() = runTest {
+        val registration = "https://dav.example.com/dav.php/push-subscriptions/" + "A".repeat(43)
+        val push = PushDontNotify()
+        push.set(listOf(registration))
+        val account = buildAccountHttpClient(
+            TrustedCertTrustManagerFactory.build(null).trustManager,
+            AuthScheme.DIGEST,
+            WebDavCredentials("alice", "secret"),
+            push,
+            null,
+        )
+        val digestClient = Dav4jvmWebDavClient(server.url("/dav.php/").toString(), push, account)
+        try {
+            server.enqueue(MockResponse.Builder().code(204).build())
+            assertNull(digestClient.discoverPush("Sync").getOrThrow())
+            val propfind = server.takeRequest()
+            assertEquals("PROPFIND", propfind.method)
+            assertNull(propfind.headers[PushDontNotify.HEADER])
+
+            val sameOrigin = server.url("/dav.php/push-subscriptions/" + "T".repeat(43)).toString()
+            server.enqueue(
+                MockResponse.Builder()
+            .code(401)
+            .setHeader(
+                    "WWW-Authenticate",
+                    """Digest realm="test", nonce="abc123", qop="auth", algorithm=MD5""",
+                )
+            .build(),
+            )
+            server.enqueue(MockResponse.Builder().code(204).build())
+            assertTrue(digestClient.unregisterPush(sameOrigin).isSuccess)
+            val first = server.takeRequest()
+            val second = server.takeRequest()
+            assertEquals("DELETE", first.method)
+            assertEquals("DELETE", second.method)
+            assertEquals("\"$registration\"", first.headers[PushDontNotify.HEADER])
+            assertEquals("\"$registration\"", second.headers[PushDontNotify.HEADER])
+            assertTrue(second.headers["Authorization"].orEmpty().startsWith("Digest "))
+            assertEquals(3, server.requestCount)
+        } finally {
+            digestClient.close()
+        }
     }
 
     @Test
@@ -153,13 +213,14 @@ class PushProtocolClientTest {
         expiresAtMillis = System.currentTimeMillis() + 7L * 24 * 60 * 60 * 1000,
     )
 
-    private fun precondition(condition: String) = MockResponse()
-        .setResponseCode(403)
-        .setHeader("Content-Type", "application/xml; charset=utf-8")
-        .setBody(
+    private fun precondition(condition: String) = MockResponse.Builder()
+            .code(403)
+            .setHeader("Content-Type", "application/xml; charset=utf-8")
+            .body(
             """<?xml version="1.0" encoding="utf-8"?>
 <D:error xmlns:D="DAV:" xmlns:P="https://bitfire.at/webdav-push"><P:$condition/></D:error>""",
         )
+            .build()
 
     private companion object {
         const val MULTISTATUS = """<?xml version="1.0"?>

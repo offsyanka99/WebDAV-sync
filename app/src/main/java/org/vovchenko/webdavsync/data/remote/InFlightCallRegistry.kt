@@ -1,24 +1,29 @@
 package org.vovchenko.webdavsync.data.remote
 
-import okhttp3.Call
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/** OkHttp calls currently blocked in `execute()`, so cancel can abort the socket. */
+/**
+ * Calls blocked in a transfer, so cancel can abort the socket.
+ * The account client's call [Job] is registered for the whole send, including a Digest retry.
+ */
 @Singleton
 class InFlightCallRegistry @Inject constructor() {
-    private val calls = ConcurrentHashMap.newKeySet<Call>()
+    private val jobs = ConcurrentHashMap.newKeySet<Job>()
 
-    fun register(call: Call) {
-        calls.add(call)
+    fun register(job: Job) {
+        jobs.add(job)
     }
 
-    fun unregister(call: Call) {
-        calls.remove(call)
+    fun unregister(job: Job) {
+        jobs.remove(job)
     }
 
     fun cancelAll() {
-        calls.forEach { call -> call.cancel() }
+        val reason = CancellationException("sync cancelled")
+        jobs.forEach { job -> job.cancel(reason) }
     }
 }

@@ -1,9 +1,9 @@
 # WebDAV-sync architecture
 
 **App:** `org.vovchenko.webdavsync`  
-**Version documented:** 1.2.2 (`versionCode` 19)  
-**Platform:** Android 8.0+ (minSdk 26, compileSdk 37, targetSdk 35)  
-**Date:** 2026-10-01
+**Version documented:** 1.3.1 (`versionCode` 20)  
+**Platform:** Android 8.0+ (minSdk 26, compileSdk 37, targetSdk 36)  
+**Date:** 2026-11-27
 
 This document describes the app as it is implemented in `app/src`. It is the map of processes, data, and the sync pipeline. Defects and recommended changes are recorded separately in `doc/review.md` (kept out of version control).
 
@@ -26,7 +26,7 @@ flowchart LR
     end
     subgraph storage [On device]
         Room[(Room)]
-        Enc[EncryptedSharedPreferences]
+        Enc[Tink credential prefs]
         SAF[SAF tree]
         DS[DataStore settings]
     end
@@ -49,15 +49,15 @@ flowchart LR
 
 | Concern | Choice |
 |---|---|
-| Language / JDK | Kotlin, JVM target 17 |
+| Language / JDK | Kotlin. App sources emit JVM 17. The compiler and unit tests run on a JDK 21 toolchain, because dav4jvm 5.0.0 is Java 21 bytecode |
 | UI | Jetpack Compose, Material 3, Navigation Compose |
 | DI | Hilt 2.60 (`@HiltAndroidApp`, `@HiltViewModel`, `@HiltWorker`) |
 | Database | Room 2.8 (SQLite), schema version 5, schema JSON under `app/schemas` |
 | Settings | DataStore Preferences (`settings`) |
-| Secrets | `androidx.security:security-crypto` EncryptedSharedPreferences, AES-256 (Tink resolved to `tink-android` 1.23.0) |
-| Push | UnifiedPush connector 3.3.5 (Web Push RFC 8030/8291/8292) plus `embedded-fcm-distributor` 3.1.0 (FOSS, no Firebase SDK; talks to Google Play services over IPC, endpoints on `fcm.googleapis.com`, VAPID required). The connector's `tink` dependency is substituted with `tink-android` in `app/build.gradle.kts` |
+| Secrets | Tink AES-256-GCM in `webdav_credentials_v2`, key wrapped by the Android Keystore (`tink-android` 1.24.0). An older `webdav_credentials` file is copied once, then removed |
+| Push | UnifiedPush connector 3.3.6 (Web Push RFC 8030/8291/8292) plus `embedded-fcm-distributor` 3.1.0 (FOSS, no Firebase SDK; talks to Google Play services over IPC, endpoints on `fcm.googleapis.com`, VAPID required). The connector's `tink` dependency is substituted with `tink-android` in `app/build.gradle.kts` |
 | Background work | WorkManager 2.12, foreground service type `dataSync` |
-| HTTP / WebDAV | OkHttp 4.12, sardine-android 0.9, okhttp-digest 3.1 |
+| HTTP / WebDAV | OkHttp 5.5.0 through Ktor 3.6.0 (`ktor-client-okhttp`), dav4jvm 5.0.0. Basic and Digest are Ktor auth. Guava 33.7.2-jre comes with dav4jvm |
 | Local files | SAF `DocumentFile` only. No `MANAGE_EXTERNAL_STORAGE` |
 | Release build | R8 minify + optimize, optional signing via gitignored `keystore.properties` |
 
@@ -75,7 +75,7 @@ app/src/main/java/org/vovchenko/webdavsync/
   domain/sync/              engine, diff, transfer, policies, overview metrics
   data/model/               SyncMethod, AuthScheme, SyncEventType
   data/local/               Room entities/DAOs, SAF, settings, credentials, diagnostics
-  data/remote/              WebDavClient, Sardine adapter, auth, TLS, path checks
+  data/remote/              WebDavClient, Dav4jvmWebDavClient, Ktor account client, auth, TLS, path checks
   data/remote/push/         WebDAV-Push XML, header validation, Push-Dont-Notify, same-origin
   data/local/push/          push registration and endpoint tables
   data/repository/          account, folder pair, baseline, logs, connection, settings, push
@@ -274,8 +274,8 @@ Stored in DataStore. Defaults for a new install:
 
 ### 6.6 Secrets and certificates
 
-- `CredentialStore`: EncryptedSharedPreferences file `webdav_credentials`, keys `account_{id}_username` / `account_{id}_password`. Writes use `apply()`.
-- `TrustedCertStore`: raw bytes in `files/trusted_certs/{id}.cert`. Not secret, but excluded from backup. The bytes are added as an extra trust anchor for that account’s OkHttp client, on top of the system CAs.
+- `CredentialStore`: Tink AES-256-GCM in private prefs `webdav_credentials_v2`, keys `account_{id}_username` / `account_{id}_password`, associated data is the key name. The keyset is wrapped by Android Keystore alias `webdavsync_credential_master_key`. Writes use `commit()`. On open, if `webdav_credentials` from security-crypto 1.1.0-alpha06 is still present, those entries are copied and the old file is deleted only after each account can be read back. A locked keystore leaves the old file for the next open. `androidx.security:security-crypto` is not on the classpath.
+- `TrustedCertStore`: raw bytes in `files/trusted_certs/{id}.cert`. Not secret, but excluded from backup. The bytes are one extra leaf for that account’s client, on top of the system CAs. The leaf is not treated as a CA. Hostname verification stays the platform default.
 - Android backup (`backup_rules.xml`, `data_extraction_rules.xml`) excludes the credential prefs, `trusted_certs/`, the Room database (including `-wal` / `-shm`), the DataStore directory, and the UnifiedPush connector state (`database/unifiedpush-connector`, its journal, `sharedpref/unifiedpush.connector.xml`, and the embedded FCM distributor's `sharedpref/UP-embedded_fcm.xml`). `allowBackup` is true for everything else.
 - User-facing backup JSON (Settings → Backup) stores settings and folder pairs (name, account display name, base URL, remote path, SAF URI, method, exclusions, flags). It does not store passwords, certificates, baselines, or any push endpoint, key, or registration.
 
@@ -373,7 +373,7 @@ Then the engine does not open a socket, does not PROPFIND, does not MKCOL, and d
 - The child URL is `RemotePaths.join(parent, name)`, then `WebDavPathSafety.sanitize`. A `.` or `..` segment throws and fails the scan.
 - If sanitizing the child yields the same path as the parent, the child is skipped (guards a self-href that escaped the list filter).
 
-`SardineWebDavClient.list` drops the collection’s own href (`DavHref.isSelf`) so the folder is not walked as `name/name`.
+`Dav4jvmWebDavClient.list` drops the collection’s own href (`DavHref.isSelf`) so the folder is not walked as `name/name`. A child whose path is not exactly one segment under the collection is also dropped.
 
 There is no depth cap and no file-count cap. The whole tree is held in memory, then the whole action list.
 
@@ -381,9 +381,9 @@ There is no depth cap and no file-count cap. The whole tree is held in memory, t
 
 `LocalNameSanitizer` rewrites `\ * ? " < > | :` to `_` and trims trailing spaces and dots, so a SAF provider that mangles a remote name still matches the baseline. The diff map key for remote entries is the sanitized path. The original server path is kept on `RemoteFileEntry.relativePath` and sent back as `remoteRelativePath` for HTTP.
 
-`WebDavPathSafety.sanitize` is the single check inside `SardineWebDavClient.resolve`: split on `/`, drop empty segments, reject `.` and `..`, join. `resolve` then appends each segment with OkHttp `addPathSegment` (percent-encoding) under the account base URL. Collection operations (list, MKCOL, exists, quota) use a trailing slash. PUT, GET, and DELETE do not.
+`WebDavPathSafety.sanitize` is the single check inside `Dav4jvmWebDavClient.resolve`: split on `/`, drop empty segments, reject `.` and `..`, join. `resolve` then appends each segment with OkHttp `addPathSegment` (percent-encoding) under the account base URL. Collection operations (list, MKCOL, exists, quota, push discovery and registration) use a trailing slash. PUT, GET, and DELETE do not.
 
-Redirects are disabled (`followRedirects` and `followSslRedirects` are false) so an authenticated client cannot be sent to another origin.
+Redirects are refused, including a redirect to the same host. The engine’s redirect flag is off, and a Ktor plugin fails the call on any 3xx before dav4jvm can send the next request.
 
 ### 7.6 Diff
 
@@ -436,7 +436,7 @@ To-device and to-cloud do **not** use that three-way table. They compare the two
 1. Directory actions, in order, on the calling coroutine. A failed MKCOL or `createDirectory` increments errors and the file phase still runs.
 2. File actions in parallel on `Dispatchers.IO`, bounded by a semaphore.
 
-Parallelism is 1 when “Allow parallel transfers” is off, otherwise 4, then possibly forced back to 1. The throttle trips when any upload is ≥ 2 MiB, or the upload batch is ≥ 32 MiB, or there are at least 4 uploads. That exists because parallel full-file staging used to hang large FLAC batches. Uploads now stream from SAF with a known `Content-Length`. `openContent` is called on every OkHttp `writeTo`, so a Digest 401 can re-read the file without a cache copy. The `uploadCacheDir` constructor argument is unused.
+Parallelism is 1 when “Allow parallel transfers” is off, otherwise 4, then possibly forced back to 1. The throttle trips when any upload is ≥ 2 MiB, or the upload batch is ≥ 32 MiB, or there are at least 4 uploads. That exists because parallel full-file staging used to hang large FLAC batches. Uploads now stream from SAF with a known `Content-Length`. `openContent` runs inside every `readFrom`, so a Digest 401 re-reads the file. There is no upload cache.
 
 Per file:
 
@@ -462,19 +462,21 @@ After a non-cancelled pass, if the pair allows it, `IdleSyncPolicy.ancestorDirec
 
 `WebDavClient` surface: `testConnection`, `list`, `upload`, `download`, `delete`, `createDirectory`, `move`, `exists`, `getQuota`, plus `discoverPush`, `registerPush`, `unregisterPush`, and `setPushDontNotify` (§16).
 
-`WebDavClientFactory` builds one OkHttp client per account for a sync pass (`WebDavClientSession`), and closes it when the pass ends so idle sockets do not keep the radio up. A derived client shares that pool for listings and other metadata calls, with a 60-second call timeout. Body transfers use the shared client with:
+`WebDavClientFactory` builds one Ktor client per account for a sync pass (`WebDavClientSession`). The engine is OkHttp. The client is closed when the pass ends so idle sockets do not keep the radio up. Close runs on the `webdav-client-close` thread, because add account resumes on the main thread.
+
+Timeouts:
 
 - Connect timeout 30 s
-- Read and write timeouts 30 min
-- Call timeout 6 h
-- TLS from `TrustedCertTrustManagerFactory` (system issuers copied into a `KeyStore`, plus the optional imported certificate)
-- Auth strategy applied after TLS
+- Everything except GET and PUT: socket and request timeout 60 s
+- GET and PUT: socket timeout 30 min, request timeout 6 h
 
-Auth probe (`AuthSchemeDetector`): unauthenticated `PROPFIND` `Depth: 0`. On 401, Digest wins if any `WWW-Authenticate` value starts with `Digest`; otherwise Basic. Any non-401 response selects Basic.
+TLS uses `TrustedCertTrustManagerFactory`: system CAs, plus one optional imported leaf. Hostname verification stays the platform default.
 
-Basic auth attaches `Authorization` on every request. Digest uses `okhttp-digest` with a per-client challenge cache.
+Auth probe (`AuthSchemeDetector`): unauthenticated `PROPFIND` `Depth: 0`. On 401, Digest wins if any `WWW-Authenticate` value starts with `Digest`; otherwise Basic. Any non-401 response selects Basic. The account client installs exactly one of Basic or Digest. Basic sends `Authorization` on every request. Digest waits for the challenge.
 
-Quota is a raw `PROPFIND` for `quota-available-bytes` and `quota-used-bytes`. Negative RFC 4331 sentinels become “unknown”. Total is available + used when both are present. A failed refresh keeps the previous stored numbers.
+List asks for `resourcetype`, `getcontentlength`, `getlastmodified`, and `getetag`. Exists is HEAD on the collection URL; HTTP 404 is false. MOVE sends `Overwrite: F`. Quota is a Depth-0 PROPFIND of `quota-available-bytes` and `quota-used-bytes`. RFC 4331 values −1, −2, and −3, and an omitted property, become “unknown”. Total is available + used when both are present. A failed refresh keeps the previous stored numbers. GET sends `Accept-Encoding: identity`.
+
+dav4jvm’s CalDAV and CardDAV property classes are removed from the jar before compile (`stripDav4jvmFactories`). PROPFIND still includes those namespace prefixes. R8 does not keep `at.bitfire.dav4jvm` as a whole.
 
 HTTP failures are classified by `WebDavErrorMapping` using exception type, or by scraping a 3-digit 4xx/5xx out of the message text.
 
@@ -538,7 +540,7 @@ Add account (`WebDavConnectionRepository.addAccount`):
 
 The password is cleared from `AddAccountViewModel` state after a successful save. Certificate bytes are read fully into memory in the ViewModel before save; parsing happens later inside the trust factory.
 
-The probe client and the authenticated client are closed after the save. `WebDavClientFactory.shutdown` drops the connection pool on OkHttp’s executor. Add account resumes on the main thread, and closing those sockets there throws `NetworkOnMainThreadException`.
+The probe client and the authenticated client are closed after the save. `WebDavClientFactory.shutdown` closes them on the `webdav-client-close` thread. Add account resumes on the main thread, and closing sockets there throws `NetworkOnMainThreadException`.
 
 Delete account is a two-step dialog. The optional “also delete the files” path:
 
@@ -589,7 +591,7 @@ These are properties of the current design, not a claim that every edge is safe.
 - SAF is the only local filesystem access. Grants are persisted on pick and released when the last pair using them is removed.
 - Backup transport is told to skip the database, DataStore, credentials, and custom certs.
 - The sync notification receiver is not exported. Its `PendingIntent`s are explicit and immutable.
-- Release builds are minified (R8). Sardine, XmlPull, and okhttp-digest are kept because they reflect.
+- Release builds are minified (R8). The platform `XmlPullParser` parses PROPFIND. There is no keep rule for dav4jvm as a whole. CalDAV and CardDAV property classes are not in the APK.
 - WebDAV-Push: a registration URL is `DELETE`d only when its scheme, host, and port equal the account base URL; otherwise no request is built. `Location` is validated (absolute `https`, ≤ 2048 printable ASCII, no `"` or `\`) before it is stored or sent in `Push-Dont-Notify`. Only messages the connector decrypted are used, and a topic is matched only against `ACTIVE` rows of the instance's own account. Push XML parsing is namespace-aware, rejects DOCTYPE, and is capped at 64 KiB (multistatus) / 4 KiB (message).
 
 ## 14. Build, test, and configuration
@@ -600,7 +602,7 @@ These are properties of the current design, not a claim that every edge is safe.
 ./gradlew :app:assembleRelease   # needs keystore.properties when a signed APK is required
 ```
 
-`keystore.properties` and `*.keystore` / `*.jks` are gitignored. ProGuard rules keep the WebDAV stack; there are no app-class keep rules.
+`keystore.properties` and `*.keystore` / `*.jks` are gitignored. ProGuard rules do not keep the WebDAV stack. There are no app-class keep rules.
 
 Unit tests cover diff cases, conflict names, idle policy, scheduler constraints, folder-change decisions, overview metrics, path sanitizing, Room DAO behavior, the 4 → 5 migration, and WebDAV-Push (XML, protocol client against MockWebServer with AngaraDAV-shaped fixtures, `Push-Dont-Notify`, planner, manager state machine, event routing, status text, log privacy). They run on the JVM with Robolectric where Android APIs are required.
 
@@ -633,6 +635,6 @@ It runs from `push_reconcile`, daily from `push_maintenance` (which also re-regi
 
 **Messages.** `WebDavPushService` (Hilt service extending the connector's `PushService`) hands each callback to `PushEventHandler` on the app scope. A content update for a topic that matches an `ACTIVE` row of that account sets `remoteChangePendingAt` on the served pairs and calls `SyncScheduler.enqueuePushSync`: a follow-up during an active session, otherwise a delayed `push_sync`. A key-rotation message sends the account's rows back to discovery. `onUnregistered` moves `ACTIVE` rows to `WAITING_FOR_ENDPOINT`.
 
-**Echo suppression.** Before a pair's pass touches the server, `SyncEngine` sets `Push-Dont-Notify` on the account client to the registration URLs that serve only this pair (`suppressionUrlsFor`), so a shared root still wakes the other pair. An OkHttp application interceptor adds it to `PUT`, `MKCOL`, `DELETE`, `MOVE`, `COPY`, `PROPPATCH`, so a Digest retry keeps it. `sync()` clears it for every client of the session in `finally`.
+**Echo suppression.** Before a pair's pass touches the server, `SyncEngine` sets `Push-Dont-Notify` on the account client to the registration URLs that serve only this pair (`suppressionUrlsFor`), so a shared root still wakes the other pair. A Ktor plugin adds it on every send, including a Digest retry, for `PUT`, `MKCOL`, `DELETE`, `MOVE`, `COPY`, and `PROPPATCH`. PROPFIND, GET, and POST do not get it. Register is POST. `sync()` clears it for every client of the session in `finally`.
 
 **UI.** Settings → Synchronization has the switch (opens the dialog above), the push service row (“Change”), and the help text in (i). Saving the dialog also clears every registration's backoff, so failed or unsupported folders are retried on the next run. Each Folders tile and the folder pair editor show a status line from `PushStatus` (green when active, red with the reason when failed; failures name the HTTP status or the failing check, never a URL).

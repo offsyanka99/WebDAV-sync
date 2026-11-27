@@ -1,18 +1,23 @@
 package org.vovchenko.webdavsync.data.remote.push
 
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
+import io.ktor.client.HttpClient
+import io.ktor.client.request.prepareRequest
+import io.ktor.client.request.setBody
+import io.ktor.http.HttpMethod
+import kotlinx.coroutines.runBlocking
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
+import mockwebserver3.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
-import org.vovchenko.webdavsync.data.local.security.WebDavCredentials
-import org.vovchenko.webdavsync.data.remote.auth.DigestAuthStrategy
+import org.vovchenko.webdavsync.data.remote.ktor.buildAccountHttpClient
+import org.vovchenko.webdavsync.data.remote.ktor.metadataCallTimeout
+import org.vovchenko.webdavsync.data.remote.trust.TrustedCertTrustManagerFactory
 
+/** Header value and method filter on the account client. */
 class PushDontNotifyTest {
 
     private lateinit var server: MockWebServer
@@ -28,55 +33,54 @@ class PushDontNotifyTest {
 
     @After
     fun tearDown() {
-        server.shutdown()
+        server.close()
     }
 
     @Test
-    fun `header only on mutating methods`() {
-        val client = OkHttpClient.Builder().addInterceptor(holder.interceptor).build()
-        holder.set(listOf(urlA))
-        val expected = "\"$urlA\""
-        for (method in listOf("PUT", "MKCOL", "DELETE", "MOVE", "COPY", "PROPPATCH")) {
-            assertEquals(method, expected, send(client, method).getHeader(PushDontNotify.HEADER))
+    fun `header only on mutating methods`() = runBlocking {
+        val client = accountClient()
+        try {
+            holder.set(listOf(urlA))
+            val expected = "\"$urlA\""
+            for (method in listOf("PUT", "MKCOL", "DELETE", "MOVE", "COPY", "PROPPATCH")) {
+                assertEquals(method, expected, send(client, method).headers[PushDontNotify.HEADER])
+            }
+            for (method in listOf("PROPFIND", "GET", "POST")) {
+                assertNull(method, send(client, method).headers[PushDontNotify.HEADER])
+            }
+        } finally {
+            client.close()
         }
-        for (method in listOf("PROPFIND", "GET", "POST")) {
-            assertNull(method, send(client, method).getHeader(PushDontNotify.HEADER))
+    }
+
+    @Test
+    fun `quotes multiple URLs and clears`() = runBlocking {
+        val client = accountClient()
+        try {
+            holder.set(listOf(urlA, urlB, urlA, "http://insecure/x", "https://x/\"y"))
+            assertEquals("\"$urlA\", \"$urlB\"", send(client, "PUT").headers[PushDontNotify.HEADER])
+            holder.set(emptyList())
+            assertNull(send(client, "PUT").headers[PushDontNotify.HEADER])
+        } finally {
+            client.close()
         }
     }
 
-    @Test
-    fun `quotes multiple URLs and clears`() {
-        val client = OkHttpClient.Builder().addInterceptor(holder.interceptor).build()
-        holder.set(listOf(urlA, urlB, urlA, "http://insecure/x", "https://x/\"y"))
-        assertEquals("\"$urlA\", \"$urlB\"", send(client, "PUT").getHeader(PushDontNotify.HEADER))
-        holder.set(emptyList())
-        assertNull(send(client, "PUT").getHeader(PushDontNotify.HEADER))
-    }
+    private fun accountClient(): HttpClient = buildAccountHttpClient(
+        TrustedCertTrustManagerFactory.build(null).trustManager,
+        null,
+        null,
+        holder,
+        null,
+    )
 
-    @Test
-    fun `header survives a Digest 401 retry`() {
-        val builder = OkHttpClient.Builder().addInterceptor(holder.interceptor)
-        DigestAuthStrategy().apply(builder, WebDavCredentials("alice", "secret"))
-        val client = builder.build()
-        holder.set(listOf(urlA))
-        server.enqueue(
-            MockResponse().setResponseCode(401)
-                .setHeader("WWW-Authenticate", """Digest realm="test", nonce="abc123", qop="auth", algorithm=MD5"""),
-        )
-        server.enqueue(MockResponse().setResponseCode(201))
-        val request = Request.Builder().url(server.url("/dav/a.txt")).put("x".toRequestBody()).build()
-        client.newCall(request).execute().use { assertEquals(201, it.code) }
-        val first = server.takeRequest()
-        val retry = server.takeRequest()
-        assertEquals("\"$urlA\"", first.getHeader(PushDontNotify.HEADER))
-        assertEquals("\"$urlA\"", retry.getHeader(PushDontNotify.HEADER))
-        assertEquals(true, retry.getHeader("Authorization")?.startsWith("Digest"))
-    }
-
-    private fun send(client: OkHttpClient, method: String): okhttp3.mockwebserver.RecordedRequest {
-        server.enqueue(MockResponse().setResponseCode(204))
-        val body = if (method == "GET") null else "".toRequestBody()
-        client.newCall(Request.Builder().url(server.url("/dav/x")).method(method, body).build()).execute().close()
+    private suspend fun send(client: HttpClient, method: String): RecordedRequest {
+        server.enqueue(MockResponse.Builder().code(204).build())
+        client.prepareRequest(server.url("/dav/x").toString()) {
+            this.method = HttpMethod(method)
+            if (method != "GET") setBody("")
+            metadataCallTimeout()
+        }.execute { }
         return server.takeRequest()
     }
 }

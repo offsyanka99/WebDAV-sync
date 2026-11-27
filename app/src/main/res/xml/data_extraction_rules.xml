@@ -2,6 +2,7 @@
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="sharedpref" path="webdav_credentials.xml" />
+        <exclude domain="sharedpref" path="webdav_credentials_v2.xml" />
         <exclude domain="file" path="trusted_certs" />
         <exclude domain="database" path="webdav_sync.db" />
         <exclude domain="database" path="webdav_sync.db-wal" />
@@ -14,6 +15,7 @@
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="webdav_credentials.xml" />
+        <exclude domain="sharedpref" path="webdav_credentials_v2.xml" />
         <exclude domain="file" path="trusted_certs" />
         <exclude domain="database" path="webdav_sync.db" />
         <exclude domain="database" path="webdav_sync.db-wal" />

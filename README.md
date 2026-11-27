@@ -2,8 +2,8 @@
 
 Android app that keeps folders you choose on the phone in sync with folders on a WebDAV server. You can run a sync yourself, on a schedule, when local files change, or when the server sends a WebDAV-Push notification.
 
-**Current version:** 1.2.2. Installers: [Releases](https://github.com/offsyanka99/WebDAV-sync/releases).  
-**Android:** 8.0 and newer (API 26). The app targets Android 15 (API 35).  
+**Current version:** 1.3.1. Installers: [Releases](https://github.com/offsyanka99/WebDAV-sync/releases).  
+**Android:** 8.0 and newer (API 26). The app targets Android 16 (API 36).  
 **License:** [MIT](LICENSE)
 
 Changes are listed in [CHANGELOG.md](CHANGELOG.md).
@@ -73,11 +73,11 @@ To report a vulnerability, use [SECURITY.md](SECURITY.md). Please do not open a 
 
 ## Build
 
-Requirements: JDK 17 and Android SDK 37.
+Requirements: JDK 17 and Android SDK 37. Gradle downloads a JDK 21 toolchain for compile and unit tests. The app targets API 36 and still emits JVM 17 bytecode.
 
 ```bash
 ./gradlew :app:assembleDebug
-# app/build/outputs/apk/debug/WebDAV-sync-1.2.2.apk
+# app/build/outputs/apk/debug/WebDAV-sync-1.3.1.apk
 
 ./gradlew :app:testDebugUnitTest
 ```
@@ -93,10 +93,10 @@ keyPassword=...
 
 ```bash
 ./gradlew :app:assembleRelease
-# app/build/outputs/apk/release/WebDAV-sync-1.2.2.apk
+# app/build/outputs/apk/release/WebDAV-sync-1.3.1.apk
 ```
 
-Release builds are minified with R8. The app is Kotlin, Jetpack Compose, Hilt, Room, DataStore, and WorkManager. WebDAV uses OkHttp 4 and sardine-android. Design notes that are kept in the repository are in [doc/architecture.md](doc/architecture.md).
+Release builds are minified with R8. The app is Kotlin, Jetpack Compose, Hilt, Room, DataStore, and WorkManager. WebDAV uses dav4jvm 5.0.0 on OkHttp 5.5.0. Design notes that are kept in the repository are in [doc/architecture.md](doc/architecture.md).
 
 ## Contact
 

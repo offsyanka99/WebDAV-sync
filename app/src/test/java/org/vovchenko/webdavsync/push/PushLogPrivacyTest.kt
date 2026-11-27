@@ -10,8 +10,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
-import okhttp3.OkHttpClient
-import okhttp3.mockwebserver.MockWebServer
+import mockwebserver3.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -27,16 +26,18 @@ import org.vovchenko.webdavsync.data.local.diagnostics.DiagnosticLog
 import org.vovchenko.webdavsync.data.local.diagnostics.DiagnosticLogger
 import org.vovchenko.webdavsync.data.local.settings.SettingsDataStore
 import org.vovchenko.webdavsync.data.remote.InFlightCallRegistry
-import org.vovchenko.webdavsync.data.remote.SardineWebDavClient
+import org.vovchenko.webdavsync.data.remote.Dav4jvmWebDavClient
 import org.vovchenko.webdavsync.data.remote.WebDavClient
 import org.vovchenko.webdavsync.data.remote.WebDavClientFactory
 import org.vovchenko.webdavsync.data.remote.WebDavClientSession
+import org.vovchenko.webdavsync.data.remote.ktor.buildAccountHttpClient
+import org.vovchenko.webdavsync.data.remote.push.PushDontNotify
+import org.vovchenko.webdavsync.data.remote.trust.TrustedCertTrustManagerFactory
 import org.vovchenko.webdavsync.data.repository.FolderPairRepository
 import org.vovchenko.webdavsync.data.repository.PushRepository
 import org.vovchenko.webdavsync.data.repository.SettingsRepository
 import org.vovchenko.webdavsync.sync.control.SyncControl
 import org.vovchenko.webdavsync.sync.worker.SyncScheduler
-import java.io.File
 
 /** Runs a full push flow with the diagnostic log on and checks no push secret reaches the file. */
 @RunWith(RobolectricTestRunner::class)
@@ -73,7 +74,7 @@ class PushLogPrivacyTest {
     fun tearDown() = runBlocking {
         logger.setEnabled(false)
         logger.clear()
-        server.shutdown()
+        server.close()
         db.close()
         settings.update { it.copy(instantDownloadEnabled = false, diagnosticLogEnabled = false) }
     }
@@ -85,40 +86,51 @@ class PushLogPrivacyTest {
             FolderPairEntity(accountId = accountId, name = "Sync", remoteFolderPath = "Sync", localFolderUri = "content://sync"),
         )
         val repository = PushRepository(db.pushDao(), db, db.folderPairDao(), settings)
-        val http = OkHttpClient.Builder().build()
-        val client = SardineWebDavClient(http, http, server.url("/dav/").toString(), File("build/tmp"))
-        val manager = PushRegistrationManager(
-            repository,
-            object : PushAccountClients {
-                override suspend fun displayName(accountId: Long) = "Cloud"
-                override suspend fun clientFor(session: WebDavClientSession, accountId: Long): WebDavClient = client
-            },
-            WebDavClientFactory(context, InFlightCallRegistry()),
-            AlwaysReadyDistributor(),
-            settings,
-            logger,
+        val push = PushDontNotify()
+        val account = buildAccountHttpClient(
+            TrustedCertTrustManagerFactory.build(null).trustManager,
+            null,
+            null,
+            push,
+            null,
         )
-        val handler = PushEventHandler(
-            repository,
-            FolderPairRepository(db.folderPairDao(), db),
-            SyncScheduler(context, settings, SyncControl(InFlightCallRegistry()), logger),
-            logger,
-        )
+        val client = Dav4jvmWebDavClient(server.url("/dav/").toString(), push, account)
+        try {
+            val manager = PushRegistrationManager(
+                repository,
+                object : PushAccountClients {
+                    override suspend fun displayName(accountId: Long) = "Cloud"
+                    override suspend fun clientFor(session: WebDavClientSession, accountId: Long): WebDavClient = client
+                },
+                WebDavClientFactory(InFlightCallRegistry()),
+                AlwaysReadyDistributor(),
+                settings,
+                logger,
+            )
+            val handler = PushEventHandler(
+                repository,
+                FolderPairRepository(db.folderPairDao(), db),
+                SyncScheduler(context, settings, SyncControl(InFlightCallRegistry()), logger),
+                logger,
+            )
 
-        server.enqueue(AngaraDavFixtures.discovered(topic))
-        manager.reconcile()
-        handler.onNewEndpoint("account-$accountId", endpointUrl, "PUBKEYSECRET", "AUTHSECRET", temporary = false)
-        server.enqueue(AngaraDavFixtures.registered(registrationUrl))
-        manager.reconcile()
-        handler.onMessage("account-$accountId", AngaraDavFixtures.contentUpdateMessage(topic), decrypted = true)
-        repository.suppressionUrlsFor(pairId)
-        settings.update { it.copy(instantDownloadEnabled = false) }
-        manager.reconcile()
+            server.enqueue(AngaraDavFixtures.discovered(topic))
+            manager.reconcile()
+            handler.onNewEndpoint("account-$accountId", endpointUrl, "PUBKEYSECRET", "AUTHSECRET", temporary = false)
+            server.enqueue(AngaraDavFixtures.registered(registrationUrl))
+            manager.reconcile()
+            handler.onMessage("account-$accountId", AngaraDavFixtures.contentUpdateMessage(topic), decrypted = true)
+            repository.suppressionUrlsFor(pairId)
+            settings.update { it.copy(instantDownloadEnabled = false) }
+            manager.reconcile()
 
-        val log = DiagnosticLog.file(context).readText()
-        assertTrue("flow should have logged", log.contains("Push message routed"))
-        listOf("TOKENSECRET", "ENDPOINTSECRET", "PUBKEYSECRET", "AUTHSECRET", "TOPICSECRET1").forEach { secret ->
-            assertFalse("log leaks $secret:\n$log", log.contains(secret))
+            val log = DiagnosticLog.file(context).readText()
+            assertTrue("flow should have logged", log.contains("Push message routed"))
+            listOf("TOKENSECRET", "ENDPOINTSECRET", "PUBKEYSECRET", "AUTHSECRET", "TOPICSECRET1").forEach { secret ->
+                assertFalse("log leaks $secret:\n$log", log.contains(secret))
+            }
+        } finally {
+            client.close()
         }
     }
 

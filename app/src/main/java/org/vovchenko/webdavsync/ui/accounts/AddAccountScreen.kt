@@ -1,5 +1,6 @@
 package org.vovchenko.webdavsync.ui.accounts
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -35,27 +36,62 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import org.vovchenko.webdavsync.ui.components.AppScaffold
+import org.vovchenko.webdavsync.ui.components.UnsavedChangesDialog
+import org.vovchenko.webdavsync.ui.navigation.BindTabLeave
+import org.vovchenko.webdavsync.ui.navigation.TabLeaveInterceptor
 
 @Composable
 fun AddAccountScreen(
     modifier: Modifier = Modifier,
     onBack: () -> Unit,
     onSaved: () -> Unit,
+    tabLeaveInterceptor: TabLeaveInterceptor? = null,
     viewModel: AddAccountViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsState()
     var passwordVisible by remember { mutableStateOf(false) }
+    var showLeaveDialog by remember { mutableStateOf(false) }
+    var pendingProceed by remember { mutableStateOf<(() -> Unit)?>(null) }
     val certPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::setTrustedCertificate)
     }
 
-    LaunchedEffect(uiState.saved) {
-        if (uiState.saved) onSaved()
+    val requestLeave: (after: (() -> Unit)?) -> Unit = requestLeave@{ after ->
+        if (uiState.isSaving) return@requestLeave
+        if (!uiState.hasUnsavedInput) {
+            onBack()
+            after?.invoke()
+        } else {
+            pendingProceed = after
+            showLeaveDialog = true
+        }
     }
+
+    LaunchedEffect(uiState.saved) {
+        if (uiState.saved) {
+            val after = pendingProceed
+            pendingProceed = null
+            showLeaveDialog = false
+            onSaved()
+            after?.invoke()
+        }
+    }
+
+    BackHandler(enabled = (uiState.hasUnsavedInput || uiState.isSaving) && !showLeaveDialog) {
+        requestLeave(null)
+    }
+    BindTabLeave(
+        interceptor = tabLeaveInterceptor,
+        handler = if (uiState.hasUnsavedInput || uiState.isSaving) {
+            { proceed -> requestLeave(proceed) }
+        } else {
+            null
+        },
+    )
 
     AppScaffold(
         title = "Add account",
-        onBack = onBack,
+        onBack = { requestLeave(null) },
         modifier = modifier,
     ) { innerPadding ->
         Column(
@@ -138,5 +174,26 @@ fun AddAccountScreen(
                 Text("Test connection & save")
             }
         }
+    }
+
+    if (showLeaveDialog) {
+        UnsavedChangesDialog(
+            message = "This account has not been saved.",
+            canSave = uiState.canSave,
+            saving = uiState.isSaving,
+            error = uiState.error,
+            onSave = { viewModel.save() },
+            onDiscard = {
+                val after = pendingProceed
+                pendingProceed = null
+                showLeaveDialog = false
+                onBack()
+                after?.invoke()
+            },
+            onKeepEditing = {
+                pendingProceed = null
+                showLeaveDialog = false
+            },
+        )
     }
 }

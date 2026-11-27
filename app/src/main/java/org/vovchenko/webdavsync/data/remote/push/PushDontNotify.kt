@@ -1,11 +1,10 @@
 package org.vovchenko.webdavsync.data.remote.push
 
-import okhttp3.Interceptor
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Per-client `Push-Dont-Notify` value (draft §4.4). Installed as an OkHttp application
- * interceptor, so authenticator retries (Digest 401) rebuild from a request that already carries it.
+ * Per-client `Push-Dont-Notify` value (draft §4.4). The account client reads [current]
+ * on every send, including the Digest retry.
  */
 class PushDontNotify {
     private val header = AtomicReference<String?>(null)
@@ -16,16 +15,6 @@ class PushDontNotify {
     }
 
     fun current(): String? = header.get()
-
-    val interceptor: Interceptor = Interceptor { chain ->
-        val request = chain.request()
-        val value = header.get()
-        if (value == null || request.method.uppercase() !in MUTATING_METHODS) {
-            chain.proceed(request)
-        } else {
-            chain.proceed(request.newBuilder().header(HEADER, value).build())
-        }
-    }
 
     companion object {
         const val HEADER = "Push-Dont-Notify"

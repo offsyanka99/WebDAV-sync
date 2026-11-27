@@ -1,5 +1,7 @@
 import java.util.Properties
 import java.io.FileInputStream
+import org.gradle.jvm.toolchain.JavaLanguageVersion
+import org.vovchenko.webdavsync.build.StripDav4jvmFactories
 
 plugins {
     id("com.android.application")
@@ -21,9 +23,9 @@ android {
     defaultConfig {
         applicationId = "org.vovchenko.webdavsync"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 19
-        versionName = "1.2.2"
+        targetSdk = 36
+        versionCode = 20
+        versionName = "1.3.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -72,22 +74,30 @@ android {
 }
 
 kotlin {
+    // dav4jvm 5.0.0 is class-file 65 (Java 21). The compiler and unit tests run on 21
+    // so they can load it. App sources still emit JVM 17 bytecode.
+    jvmToolchain(21)
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
+}
+
+tasks.withType<Test>().configureEach {
+    javaLauncher.set(javaToolchains.launcherFor {
+        languageVersion.set(JavaLanguageVersion.of(21))
+    })
 }
 
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
 }
 
-// The UnifiedPush connector depends on the JVM `tink`, which duplicates security-crypto's
-// `tink-android`. Resolve both to one tink-android; stored passwords were verified to decrypt
-// after the 1.8.0 → 1.23.0 upgrade (plan R1).
+// The UnifiedPush connector depends on the JVM `tink`. Credentials use tink-android
+// (Android Keystore). Resolve every `tink` request to that one artifact.
 configurations.all {
     resolutionStrategy.dependencySubstitution {
         substitute(module("com.google.crypto.tink:tink"))
-            .using(module("com.google.crypto.tink:tink-android:1.23.0"))
+            .using(module("com.google.crypto.tink:tink-android:1.24.0"))
     }
 }
 
@@ -103,6 +113,23 @@ androidComponents {
     }
 }
 
+val dav4jvmUpstream = configurations.register("dav4jvmUpstream") {
+    isCanBeResolved = true
+    isCanBeConsumed = false
+    isTransitive = true
+}
+
+val strippedDav4jvmJar = layout.buildDirectory.file("dav4jvm/dav4jvm-no-caldav.jar")
+
+val stripDav4jvmFactories = tasks.register("stripDav4jvmFactories") {
+    inputs.files(dav4jvmUpstream)
+    outputs.file(strippedDav4jvmJar)
+    doLast {
+        val jar = inputs.files.files.single { it.name.startsWith("dav4jvm-") && it.extension == "jar" }
+        StripDav4jvmFactories.rewriteJar(jar, strippedDav4jvmJar.get().asFile)
+    }
+}
+
 dependencies {
     implementation("com.google.android.material:material:1.14.0")
     implementation(platform("androidx.compose:compose-bom:2026.09.00"))
@@ -114,7 +141,7 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.navigation:navigation-compose:2.10.2")
     implementation("androidx.core:core-ktx:1.19.1")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.11.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.11.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 
     implementation("com.google.dagger:hilt-android:2.60.1")
@@ -125,23 +152,29 @@ dependencies {
     implementation("androidx.room:room-ktx:2.8.5")
     ksp("androidx.room:room-compiler:2.8.5")
 
-    implementation("androidx.datastore:datastore-preferences:1.2.1")
-    // Still the deprecated Jetpack crypto artifact. Replacing it would rewrite stored passwords.
-    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("androidx.datastore:datastore-preferences:1.3.0")
+    implementation("com.google.crypto.tink:tink-android:1.24.0")
 
     // WebDAV-Push transport (no FCM). Tink resolution: see configurations.all above.
-    implementation("org.unifiedpush.android:connector:3.3.5")
+    implementation("org.unifiedpush.android:connector:3.3.6")
     // Built-in "Google Play (FCM)" push service: FOSS, no Firebase SDK; works only where Play services exist.
     implementation("org.unifiedpush.android:embedded-fcm-distributor:3.1.0")
 
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("com.github.thegrizzlylabs:sardine-android:0.9") {
-        // xpp3 duplicates org.xmlpull.v1.XmlPullParser, which the Android platform already
-        // provides (and always takes precedence over at runtime) — the duplicate program class
-        // otherwise breaks R8 minification (`isMinifyEnabled = true`, security audit finding #15).
+    // OkHttp 5.5.0 is the engine. The redirect and PUT-replay checks passed on it.
+    // Do not add OkHttp 4 beside it.
+    implementation("com.squareup.okhttp3:okhttp:5.5.0")
+    implementation("io.ktor:ktor-client-core:3.6.0")
+    implementation("io.ktor:ktor-client-okhttp:3.6.0")
+    implementation("io.ktor:ktor-client-auth:3.6.0")
+    // The published jar is rewritten by stripDav4jvmFactories. Its transitives are declared
+    // here so they stay in Gradle's conflict resolution instead of arriving as a second copy.
+    add("dav4jvmUpstream", "com.github.bitfireAT:dav4jvm:5.0.0") {
+        exclude(group = "org.ogce", module = "xpp3")
         exclude(group = "xpp3", module = "xpp3")
     }
-    implementation("io.github.rburgst:okhttp-digest:3.1.1")
+    implementation(files(strippedDav4jvmJar).builtBy(stripDav4jvmFactories))
+    implementation("com.google.guava:guava:33.7.2-jre")
+    implementation("io.ktor:ktor-client-encoding:3.6.0")
 
     implementation("androidx.documentfile:documentfile:1.1.0")
 
@@ -155,9 +188,9 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
     testImplementation("androidx.room:room-testing:2.8.5")
     testImplementation("androidx.work:work-testing:2.12.0")
-    testImplementation("org.robolectric:robolectric:4.17")
+    testImplementation("org.robolectric:robolectric:4.18.1")
     testImplementation("androidx.test:core:1.7.0")
-    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    testImplementation("com.squareup.okhttp3:mockwebserver3:5.5.0")
 
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test:runner:1.7.0")

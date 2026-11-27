@@ -1,5 +1,6 @@
 package org.vovchenko.webdavsync.ui.folders.addfolder
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -41,6 +42,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import org.vovchenko.webdavsync.data.model.SyncMethod
 import org.vovchenko.webdavsync.ui.components.AppScaffold
 import org.vovchenko.webdavsync.ui.components.ToggleRow
+import org.vovchenko.webdavsync.ui.components.UnsavedChangesDialog
+import org.vovchenko.webdavsync.ui.navigation.BindTabLeave
+import org.vovchenko.webdavsync.ui.navigation.TabLeaveInterceptor
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -48,9 +52,11 @@ fun AddEditFolderPairScreen(
     modifier: Modifier = Modifier,
     onBack: () -> Unit,
     onAddAccountClick: () -> Unit,
+    tabLeaveInterceptor: TabLeaveInterceptor? = null,
     viewModel: AddEditFolderPairViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val formDirty by viewModel.hasUnsavedChanges.collectAsState()
     val pushStatus by viewModel.pushStatus.collectAsState()
     val form = uiState.form
 
@@ -58,17 +64,52 @@ fun AddEditFolderPairScreen(
         uri?.let(viewModel::onLocalFolderPicked)
     }
 
-    LaunchedEffect(uiState.saved, uiState.deleted) {
-        if (uiState.saved || uiState.deleted) onBack()
-    }
-
     var accountMenuExpanded by remember { mutableStateOf(false) }
     var syncMethodMenuExpanded by remember { mutableStateOf(false) }
     var newExcludedPath by remember { mutableStateOf("") }
+    var showLeaveDialog by remember { mutableStateOf(false) }
+    var savingLeave by remember { mutableStateOf(false) }
+    var pendingProceed by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val dirty = formDirty || newExcludedPath.isNotBlank()
+
+    val requestLeave: (after: (() -> Unit)?) -> Unit = requestLeave@{ after ->
+        if (savingLeave) return@requestLeave
+        if (!dirty) {
+            onBack()
+            after?.invoke()
+        } else {
+            pendingProceed = after
+            showLeaveDialog = true
+        }
+    }
+
+    LaunchedEffect(uiState.error) {
+        if (uiState.error != null) savingLeave = false
+    }
+
+    LaunchedEffect(uiState.saved, uiState.deleted) {
+        if (uiState.saved || uiState.deleted) {
+            val after = pendingProceed
+            pendingProceed = null
+            showLeaveDialog = false
+            onBack()
+            after?.invoke()
+        }
+    }
+
+    BackHandler(enabled = (dirty || savingLeave) && !showLeaveDialog) {
+        requestLeave(null)
+    }
+    BindTabLeave(tabLeaveInterceptor, handler = { proceed -> requestLeave(proceed) })
+    LaunchedEffect(tabLeaveInterceptor) {
+        val proceed = tabLeaveInterceptor?.deferredProceed ?: return@LaunchedEffect
+        tabLeaveInterceptor.deferredProceed = null
+        requestLeave(proceed)
+    }
 
     AppScaffold(
         title = if (uiState.isEditing) "Edit folder pair" else "Add folder pair",
-        onBack = onBack,
+        onBack = { requestLeave(null) },
         modifier = modifier,
     ) { innerPadding ->
         Column(
@@ -233,7 +274,18 @@ fun AddEditFolderPairScreen(
                 Text(text = uiState.error!!, color = MaterialTheme.colorScheme.error)
             }
 
-            Button(onClick = viewModel::save, enabled = form.canSave, modifier = Modifier.fillMaxWidth()) {
+            Button(
+                onClick = {
+                    if (newExcludedPath.isNotBlank()) {
+                        viewModel.addExcludedSubfolder(newExcludedPath)
+                        newExcludedPath = ""
+                    }
+                    savingLeave = true
+                    if (!viewModel.save()) savingLeave = false
+                },
+                enabled = form.canSave && !savingLeave,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 Text("Save")
             }
 
@@ -246,6 +298,34 @@ fun AddEditFolderPairScreen(
                 }
             }
         }
+    }
+
+    if (showLeaveDialog) {
+        UnsavedChangesDialog(
+            message = "This folder pair has unsaved changes.",
+            canSave = form.canSave,
+            saving = savingLeave,
+            error = uiState.error,
+            onSave = {
+                if (newExcludedPath.isNotBlank()) {
+                    viewModel.addExcludedSubfolder(newExcludedPath)
+                    newExcludedPath = ""
+                }
+                savingLeave = true
+                if (!viewModel.save()) savingLeave = false
+            },
+            onDiscard = {
+                val after = pendingProceed
+                pendingProceed = null
+                showLeaveDialog = false
+                onBack()
+                after?.invoke()
+            },
+            onKeepEditing = {
+                pendingProceed = null
+                showLeaveDialog = false
+            },
+        )
     }
 }
 

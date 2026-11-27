@@ -8,7 +8,7 @@ import java.io.InputStream
 
 /**
  * Thin abstraction over the WebDAV protocol operations the sync engine needs (plan Phase 2).
- * Implemented by [SardineWebDavClient]; kept generic (streams, not `java.io.File`) so Phase 3's
+ * Implemented by [Dav4jvmWebDavClient]; kept generic (streams, not `java.io.File`) so Phase 3's
  * SAF-backed local files can be bridged without a WebDavClient rework.
  */
 interface WebDavClient : Closeable {

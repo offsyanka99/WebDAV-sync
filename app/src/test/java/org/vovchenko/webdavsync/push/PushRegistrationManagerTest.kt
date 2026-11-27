@@ -8,9 +8,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
-import okhttp3.OkHttpClient
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -30,13 +29,15 @@ import org.vovchenko.webdavsync.data.local.push.PushEndpointState
 import org.vovchenko.webdavsync.data.local.push.PushRegistrationState
 import org.vovchenko.webdavsync.data.local.settings.SettingsDataStore
 import org.vovchenko.webdavsync.data.remote.InFlightCallRegistry
-import org.vovchenko.webdavsync.data.remote.SardineWebDavClient
+import org.vovchenko.webdavsync.data.remote.Dav4jvmWebDavClient
 import org.vovchenko.webdavsync.data.remote.WebDavClient
 import org.vovchenko.webdavsync.data.remote.WebDavClientFactory
 import org.vovchenko.webdavsync.data.remote.WebDavClientSession
+import org.vovchenko.webdavsync.data.remote.ktor.buildAccountHttpClient
+import org.vovchenko.webdavsync.data.remote.push.PushDontNotify
+import org.vovchenko.webdavsync.data.remote.trust.TrustedCertTrustManagerFactory
 import org.vovchenko.webdavsync.data.repository.PushRepository
 import org.vovchenko.webdavsync.data.repository.SettingsRepository
-import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
@@ -49,6 +50,7 @@ class PushRegistrationManagerTest {
     private lateinit var repository: PushRepository
     private lateinit var distributor: FakeDistributor
     private lateinit var accounts: FakeAccounts
+    private lateinit var client: Dav4jvmWebDavClient
     private lateinit var manager: PushRegistrationManager
     private var accountId = 0L
 
@@ -64,12 +66,20 @@ class PushRegistrationManagerTest {
         settings.update { it.copy(instantDownloadEnabled = true) }
         repository = PushRepository(db.pushDao(), db, db.folderPairDao(), settings)
         distributor = FakeDistributor()
-        val http = OkHttpClient.Builder().followRedirects(false).build()
-        accounts = FakeAccounts(SardineWebDavClient(http, http, server.url("/dav/").toString(), File("build/tmp")))
+        val push = PushDontNotify()
+        val account = buildAccountHttpClient(
+            TrustedCertTrustManagerFactory.build(null).trustManager,
+            null,
+            null,
+            push,
+            null,
+        )
+        client = Dav4jvmWebDavClient(server.url("/dav/").toString(), push, account)
+        accounts = FakeAccounts(client)
         manager = PushRegistrationManager(
             repository,
             accounts,
-            WebDavClientFactory(context, InFlightCallRegistry()),
+            WebDavClientFactory(InFlightCallRegistry()),
             distributor,
             settings,
             DiagnosticLogger(context, settings, CoroutineScope(Dispatchers.Unconfined)),
@@ -83,14 +93,15 @@ class PushRegistrationManagerTest {
 
     @After
     fun tearDown() = runBlocking {
-        server.shutdown()
+        if (::client.isInitialized) client.close()
+        server.close()
         db.close()
         settings.update { it.copy(instantDownloadEnabled = false) }
     }
 
     @Test
     fun `discover, request endpoint, then register`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(207).setBody(multistatus()))
+        server.enqueue(MockResponse.Builder().code(207).body(multistatus()).build())
         manager.reconcile()
 
         val discovered = repository.getRegistrations().single()
@@ -110,8 +121,8 @@ class PushRegistrationManagerTest {
         assertEquals("https://push.example/up/1", active.endpointUrl)
         val post = server.takeRequest()
         assertEquals("POST", post.method)
-        assertEquals("/dav/Sync/", post.path)
-        assertTrue(post.body.readUtf8().contains("<P:push-resource>https://push.example/up/1</P:push-resource>"))
+        assertEquals("/dav/Sync/", post.target)
+        assertTrue(post.body!!.utf8().contains("<P:push-resource>https://push.example/up/1</P:push-resource>"))
 
         // Nothing due: no network at all.
         manager.reconcile()
@@ -120,7 +131,7 @@ class PushRegistrationManagerTest {
 
     @Test
     fun `missing root waits and is re-discovered after the pair syncs`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(404))
+        server.enqueue(MockResponse.Builder().code(404).build())
         manager.reconcile()
         assertEquals(PushRegistrationState.WAITING_FOR_ROOT, repository.getRegistrations().single().state)
 
@@ -128,9 +139,9 @@ class PushRegistrationManagerTest {
         manager.reconcile()
         assertEquals(1, server.requestCount)
 
-        server.enqueue(MockResponse().setResponseCode(207).setBody(multistatus()))
+        server.enqueue(MockResponse.Builder().code(207).body(multistatus()).build())
         val pairId = db.folderPairDao().getEnabled().single().id
-        WebDavClientFactory(context, InFlightCallRegistry()).openSession().use { session ->
+        WebDavClientFactory(InFlightCallRegistry()).openSession().use { session ->
             manager.afterSyncPass(setOf(accountId), listOf(pairId), session)
         }
         assertEquals(PushRegistrationState.WAITING_FOR_ENDPOINT, repository.getRegistrations().single().state)
@@ -146,7 +157,7 @@ class PushRegistrationManagerTest {
             repository.updateRegistration(it.copy(state = PushRegistrationState.WAITING_FOR_ENDPOINT, topic = "t", vapidPublicKey = vapid))
         }
         readyEndpoint("https://push.example/up/1")
-        server.enqueue(MockResponse().setResponseCode(429).setHeader("Retry-After", "120"))
+        server.enqueue(MockResponse.Builder().code(429).setHeader("Retry-After", "120").build())
 
         val before = System.currentTimeMillis()
         manager.reconcile()
@@ -204,7 +215,7 @@ class PushRegistrationManagerTest {
     @Test
     fun `no saved distributor fails the endpoint without registering`() = runTest {
         distributor.saved = null
-        server.enqueue(MockResponse().setResponseCode(207).setBody(multistatus()))
+        server.enqueue(MockResponse.Builder().code(207).body(multistatus()).build())
         manager.reconcile()
 
         val endpoint = repository.getEndpoint(accountId)!!
@@ -236,7 +247,7 @@ class PushRegistrationManagerTest {
 
     @Test
     fun `server without file push leaves the folder unsupported`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(207).setBody(AngaraDavFixtures.multistatusWithoutPush()))
+        server.enqueue(MockResponse.Builder().code(207).body(AngaraDavFixtures.multistatusWithoutPush()).build())
         manager.reconcile()
 
         val row = repository.getRegistrations().single()
@@ -260,7 +271,7 @@ class PushRegistrationManagerTest {
 
     @Test
     fun `failures name the HTTP status or the failing check`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(500))
+        server.enqueue(MockResponse.Builder().code(500).build())
         manager.reconcile()
         assertEquals("Server error (HTTP 500)", repository.getRegistrations().single().lastError)
 
@@ -268,7 +279,7 @@ class PushRegistrationManagerTest {
         repository.updateRegistration(row.copy(state = PushRegistrationState.WAITING_FOR_ENDPOINT, nextAttemptAt = null, topic = "t", vapidPublicKey = vapid))
         readyEndpoint("https://push.example/up/1")
         // A server with an http push_external_url hands out an http Location.
-        server.enqueue(MockResponse().setResponseCode(204).setHeader("Location", "http://dav.example.com/push-subscriptions/x"))
+        server.enqueue(MockResponse.Builder().code(204).setHeader("Location", "http://dav.example.com/push-subscriptions/x").build())
         manager.reconcile()
         val failed = repository.getRegistrations().single()
         assertEquals(PushRegistrationState.FAILED, failed.state)

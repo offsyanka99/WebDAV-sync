@@ -1,6 +1,24 @@
 # Changelog
 
-Current version is 1.2.2. Installers are on [Releases](https://github.com/offsyanka99/WebDAV-sync/releases).
+Current version is 1.3.1. Installers are on [Releases](https://github.com/offsyanka99/WebDAV-sync/releases).
+
+## v1.3.1
+
+- **WebDAV client replaced.** File and folder calls, quota, and WebDAV-Push discovery, registration, and removal go through dav4jvm 5.0.0 on OkHttp 5.5.0. sardine-android and okhttp-digest are no longer in the app. Basic and Digest login, HTTPS, private certificates, and WebDAV-Push behave as before.
+- **Redirects are still refused**, including a redirect to the same host.
+- **Uploads still stream.** A Digest challenge re-reads the file. Nothing is staged in the app cache.
+- **Release builds no longer keep CalDAV or CardDAV property classes.** PROPFIND requests still send those namespace prefixes.
+- The compiler and unit tests use a JDK 21 toolchain. The app itself still runs as JVM 17 bytecode.
+
+## v1.2.3
+
+- **Cloud Storage separates accounts.** When more than one account is configured, a line is drawn between them on Overview.
+- **Settings opens on its menu.** Leaving Synchronization, Configuration, Accounts, Backup & Restore, or About, then opening Settings again, shows the menu.
+- **Leaving a folder pair asks to save or discard.** Back, or another tab, no longer drops the edits or reopens the editor later. An unfinished new account asks the same way.
+- **Passwords move off `security-crypto`.** Existing `webdav_credentials` entries are copied into a Tink AES-256-GCM store wrapped by the Android Keystore, then the old file is removed. A locked phone keeps the old file and retries after unlock. A new install does not create `webdav_credentials`.
+- **Target Android 16 (API 36).** The sync foreground service stays `dataSync`. The channel is created before the foreground notification. Denying notifications does not stop a sync. The first launch asks for notification permission so the progress notice can be shown. System-bar insets are consumed once so the top bar and bottom actions are not covered twice.
+- **OkHttp stays 4.12.0.** `okhttp-digest` 3.1.1 is still the newest digest library and it is built for OkHttp 4. Sardine 0.9 stays with it. Digest and Basic auth are unchanged.
+- Kotlin 2.4.20 to 2.4.21, KSP 2.3.12 to 2.3.14, Lifecycle 2.11.0 to 2.11.1, DataStore Preferences 1.2.1 to 1.3.0, Tink Android 1.23.0 to 1.24.0, UnifiedPush connector 3.3.5 to 3.3.6, Robolectric 4.17 to 4.18.1.
 
 ## v1.2.2
 
@@ -11,8 +29,6 @@ Current version is 1.2.2. Installers are on [Releases](https://github.com/offsya
 - WorkManager 2.11.2 to 2.12.0 (`work-runtime-ktx` and `work-testing`).
 - Robolectric 4.16.1 to 4.17.
 - Release notes moved from the README into this file. The README now describes the current app.
-
-Not in this bump: OkHttp 4.12.0, `security-crypto` 1.1.0-alpha06, and `targetSdk` 35.
 
 ## v1.2.1
 

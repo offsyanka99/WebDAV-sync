@@ -5,7 +5,7 @@ package org.vovchenko.webdavsync.data.remote
  * (security audit finding #1). Remote path segments can originate from untrusted input — a
  * malicious/misconfigured WebDAV server's PROPFIND response names, or a restored backup JSON
  * (plan §4.8) — so every path must be normalized and checked here, at the single chokepoint all
- * [WebDavClient] operations funnel through ([SardineWebDavClient.resolve]).
+ * [WebDavClient] operations funnel through ([Dav4jvmWebDavClient.resolve]).
  */
 object WebDavPathSafety {
     /**

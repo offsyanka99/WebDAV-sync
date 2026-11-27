@@ -1,11 +1,17 @@
 package org.vovchenko.webdavsync
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.padding
+import androidx.core.content.ContextCompat
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
@@ -39,6 +45,8 @@ import org.vovchenko.webdavsync.ui.accounts.AccountsScreen
 import org.vovchenko.webdavsync.ui.accounts.AddAccountScreen
 import org.vovchenko.webdavsync.ui.folders.FoldersScreen
 import org.vovchenko.webdavsync.ui.folders.addfolder.AddEditFolderPairScreen
+import org.vovchenko.webdavsync.ui.navigation.TabBackStackPolicy
+import org.vovchenko.webdavsync.ui.navigation.TabLeaveInterceptor
 import org.vovchenko.webdavsync.ui.overview.OverviewScreen
 import org.vovchenko.webdavsync.ui.settings.AboutScreen
 import org.vovchenko.webdavsync.ui.settings.BackupRestoreScreen
@@ -61,10 +69,20 @@ class MainActivity : ComponentActivity() {
 
     @Inject lateinit var syncRequestToken: SyncRequestToken
 
+    /**
+     * The foreground sync notification is shown only when this is granted. A denial
+     * does not cancel WorkManager; [org.vovchenko.webdavsync.sync.worker.SyncWorker]
+     * still calls setForeground.
+     */
+    private val requestNotificationPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* Sync does not wait on the result. */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pendingSyncRequest.value = syncRequestToken.accepts(intent)
         enableEdgeToEdge()
+        requestNotificationPermissionIfNeeded()
         setContent {
             WebDavSyncTheme {
                 val pending by pendingSyncRequest.collectAsState()
@@ -73,6 +91,17 @@ class MainActivity : ComponentActivity() {
                     onPendingSyncConsumed = { pendingSyncRequest.value = false },
                 )
             }
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < 33) return
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
@@ -96,27 +125,30 @@ private fun WebDavSyncAppContent(
     onPendingSyncConsumed: () -> Unit = {},
 ) {
     val navController = rememberNavController()
+    val tabLeaveInterceptor = remember { TabLeaveInterceptor() }
     var triggerOverviewSync by remember { mutableStateOf(false) }
 
     LaunchedEffect(pendingSyncRequest) {
         if (pendingSyncRequest) {
-            navController.navigate(BottomDestination.Overview.route) {
-                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                launchSingleTop = true
-                restoreState = true
+            // Drop Settings details, but do not pop a form that still needs save or discard.
+            if (tabLeaveInterceptor.onAttemptLeave == null) {
+                navController.collapseSettingsDetails()
             }
+            navController.navigateToTab(BottomDestination.Overview)
             triggerOverviewSync = true
             onPendingSyncConsumed()
         }
     }
 
     Scaffold(
-        bottomBar = { WebDavSyncBottomBar(navController) },
+        bottomBar = { WebDavSyncBottomBar(navController, tabLeaveInterceptor) },
     ) { innerPadding ->
         NavHost(
             navController = navController,
             startDestination = BottomDestination.Overview.route,
-            modifier = Modifier.padding(innerPadding),
+            modifier = Modifier
+                .padding(innerPadding)
+                .consumeWindowInsets(innerPadding),
         ) {
             composable(BottomDestination.Overview.route) {
                 OverviewScreen(
@@ -135,6 +167,7 @@ private fun WebDavSyncAppContent(
                 AddEditFolderPairScreen(
                     onBack = { navController.popBackStack() },
                     onAddAccountClick = { navController.navigate("accounts/add") },
+                    tabLeaveInterceptor = tabLeaveInterceptor,
                 )
             }
             composable(
@@ -144,6 +177,7 @@ private fun WebDavSyncAppContent(
                 AddEditFolderPairScreen(
                     onBack = { navController.popBackStack() },
                     onAddAccountClick = { navController.navigate("accounts/add") },
+                    tabLeaveInterceptor = tabLeaveInterceptor,
                 )
             }
             composable("accounts") {
@@ -156,6 +190,7 @@ private fun WebDavSyncAppContent(
                 AddAccountScreen(
                     onBack = { navController.popBackStack() },
                     onSaved = { navController.popBackStack() },
+                    tabLeaveInterceptor = tabLeaveInterceptor,
                 )
             }
             composable(BottomDestination.Settings.route) {
@@ -184,7 +219,10 @@ private fun WebDavSyncAppContent(
 }
 
 @Composable
-private fun WebDavSyncBottomBar(navController: NavController) {
+private fun WebDavSyncBottomBar(
+    navController: NavController,
+    tabLeaveInterceptor: TabLeaveInterceptor,
+) {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
 
@@ -195,16 +233,59 @@ private fun WebDavSyncBottomBar(navController: NavController) {
             NavigationBarItem(
                 selected = selected,
                 onClick = {
-                    navController.navigate(destination.route) {
-                        popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                        launchSingleTop = true
-                        restoreState = true
+                    val proceed = { navController.finishTabSwitch(destination, tabLeaveInterceptor) }
+                    val leave = tabLeaveInterceptor.onAttemptLeave
+                    if (leave != null) {
+                        leave(proceed)
+                    } else {
+                        if (currentRoute == TabBackStackPolicy.ADD_ACCOUNT_ROUTE) {
+                            navController.popBackStack()
+                        }
+                        proceed()
                     }
                 },
                 icon = { Icon(imageVector = destination.icon(), contentDescription = destination.label) },
                 label = { Text(destination.label) },
             )
         }
+    }
+}
+
+/**
+ * Settings details are popped before the tab switch saves state. Otherwise
+ * [navigateToTab] would restore Configuration (or whichever item was open) on the next visit.
+ * A clean pop does not save those entries.
+ */
+private fun NavController.collapseSettingsDetails() {
+    val routes = currentBackStack.value.map { it.destination.route }
+    if (TabBackStackPolicy.shouldCollapseToSettingsMenu(routes)) {
+        popBackStack(TabBackStackPolicy.SETTINGS_ROUTE, inclusive = false)
+    }
+}
+
+/**
+ * After the visible form has popped itself, a folder editor uncovered underneath
+ * still has to accept save or discard. [TabLeaveInterceptor.deferredProceed] waits
+ * until that editor is composed again.
+ */
+private fun NavController.finishTabSwitch(
+    destination: BottomDestination,
+    tabLeaveInterceptor: TabLeaveInterceptor,
+) {
+    collapseSettingsDetails()
+    val top = currentBackStackEntry?.destination?.route
+    if (TabBackStackPolicy.isFolderEditor(top)) {
+        tabLeaveInterceptor.deferredProceed = { navigateToTab(destination) }
+    } else {
+        navigateToTab(destination)
+    }
+}
+
+private fun NavController.navigateToTab(destination: BottomDestination) {
+    navigate(destination.route) {
+        popUpTo(graph.findStartDestination().id) { saveState = true }
+        launchSingleTop = true
+        restoreState = true
     }
 }
 
