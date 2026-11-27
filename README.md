@@ -37,12 +37,12 @@ A pass shows a foreground notification with pause, resume, and cancel only while
 
 Any WebDAV server that supports the methods this app uses (list, download, upload, delete, and create folder) can be a target. Authentication is Basic or Digest, detected from the server. HTTPS is required. You can import a private CA for a server with its own certificate.
 
-[NexusDAV](https://github.com/offsyanka99/NexusDAV) can push file-storage changes. Turn that on in the server under **System settings → Enable WebDAV-Push for file storage**. Docker image: `ghcr.io/offsyanka99/nexusdav`.
+[NexusDAV](https://github.com/offsyanka99/NexusDAV) can push file-storage changes. On the server, turn that on under **Settings → Enable Include Files in push**. Docker image: `ghcr.io/offsyanka99/nexusdav`.
 
 On the phone, pick the push service under **Settings → Synchronization**:
 
 - **Google Play (FCM).** Works on devices with Google Play services. The app does not ship the Firebase SDK.
-- A [UnifiedPush](https://unifiedpush.org/) app, such as ntfy, if you do not want the notification to go through Google.
+- A [UnifiedPush](https://unifiedpush.org/) app, such as ntfy, if you do not want the notification to go through Google. If that app is on a private network, the server must be allowed to reach it. In NexusDAV, turn on **Allow private networks** under Settings.
 
 The notification is end-to-end encrypted. The push service sees that a message arrived and an opaque folder id. It does not see file names or contents. The app’s own uploads and deletes are marked so they are not delivered back to this phone.
 
